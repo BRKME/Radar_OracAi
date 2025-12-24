@@ -1,0 +1,21 @@
+# Работа с биржами и получение данных
+ccxt==4.2.25
+yfinance==0.2.36
+
+# Технический анализ
+pandas==2.2.0
+pandas-ta==0.3.14b0
+numpy==1.26.3
+
+# AI анализ
+openai==1.12.0
+
+# Telegram бот
+python-telegram-bot==20.7
+
+# Макроэкономические данные
+fredapi==0.5.1
+
+# Утилиты
+python-dotenv==1.0.0
+requests==2.31.0
