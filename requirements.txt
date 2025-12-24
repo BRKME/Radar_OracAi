@@ -10,9 +10,6 @@ ta==0.11.0
 # AI анализ
 openai==1.12.0
 
-# Telegram бот
-python-telegram-bot==20.7
-
 # Макроэкономические данные
 fredapi==0.5.1
 
