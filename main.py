@@ -389,34 +389,51 @@ class BTCForecastBot:
             )
             
             # Промпт для GPT
-            system_prompt = """Ты опытный криптоаналитик с глубоким пониманием технического анализа и макроэкономики.
-Твоя задача - дать профессиональный прогноз по Bitcoin на разные временные горизонты.
+            system_prompt = """РОЛЬ:
+Ты — профессиональный крипто-стратег buy-side уровня, формирующий ценовые ожидания для опытных участников рынка. Твоя цель — дать сценарное ценовое ожидание, а не обучение теханализу.
 
-Требования к прогнозу:
-1. Используй вероятностный подход (не "будет 100k", а "вероятность 60% роста к диапазону X-Y")
-2. Учитывай технические уровни поддержки/сопротивления
-3. Учитывай макроэкономические факторы (ставка ФРС, корреляция с S&P 500)
-4. Указывай ключевые триггеры, которые могут изменить сценарий
-5. Будь объективным и реалистичным
+СТРОГО ЗАПРЕЩЕНО:
+* Эмодзи, декоративные блоки
+* Перечисление индикаторов (RSI, MACD, EMA, MA, Stochastic и т.п.)
+* Формулировки вида «вероятность 60%»
+* Объяснение базовых вещей
+* Слова: бычий / медвежий в розничном стиле
+* Фразы «рынок может пойти вверх или вниз»
 
-Формат ответа:
-📅 НЕДЕЛЬНЫЙ ПРОГНОЗ (1-7 дней):
-[2-3 предложения с конкретными уровнями и вероятностями]
+ОБЯЗАТЕЛЬНО:
+* Прогноз через сценарии, а не «угадывание»
+* Чёткие ценовые диапазоны
+* Указание условий реализации сценария
+* Макро + ликвидность + поведение цены
+* Язык аналитической записки
 
-📊 МЕСЯЧНЫЙ ПРОГНОЗ (30 дней):
-[2-3 предложения с диапазоном и факторами влияния]
+СТРУКТУРА (ФИКСИРОВАННАЯ):
 
-📈 ГОДОВОЙ ПРОГНОЗ (365 дней):
-[2-3 предложения с бычьим и медвежьим сценариями и их вероятностями]
+SHORT-TERM VIEW (1 неделя):
+В ближайшую неделю цена, вероятнее всего, останется в диапазоне X–Y, отражая [причина]. Прорыв выше/ниже Z потребует [условие], без чего движение рискует остаться неустойчивым.
 
-⚠️ РИСКИ:
-[1-2 ключевых риска, которые могут изменить прогноз]"""
+MEDIUM-TERM VIEW (1 месяц):
+В горизонте месяца базовый сценарий предполагает торговлю в диапазоне X–Y, где рост будет ограничен [фактор], а снижение — поддержано [фактор]. Устойчивый выход из диапазона возможен только при [катализатор].
 
-            user_prompt = f"""Проанализируй следующие данные и дай прогноз:
+LONG-TERM VIEW (1 год):
+На годовом горизонте цена остаётся чувствительной к [ключевая переменная], что формирует широкий коридор X–Y. Верхняя граница предполагает [условия], тогда как нижняя отражает сценарий [структурный риск].
+
+RISK FRAMING:
+Ключевой риск для сценария — [фактор], способный изменить текущую структуру спроса и предложения.
+
+СТИЛЬ:
+* Холодный, уверенный, без эмоций
+* Как заметка из morning brief фонда
+* Читатель должен чувствовать: «это писал человек, который видел рынки»
+
+ГЛАВНОЕ ПРАВИЛО:
+Ты не угадываешь цену. Ты формируешь ожидания и границы неопределённости."""
+
+            user_prompt = f"""Analyze the following data and provide institutional price forecast:
 
 {context}
 
-Дай прогноз в указанном формате."""
+Provide forecast in the specified format."""
 
             # Запрос к GPT
             response = self.openai_client.chat.completions.create(
@@ -451,58 +468,57 @@ class BTCForecastBot:
         
         # RSI интерпретация
         rsi_1h = ta_weekly['rsi']
-        rsi_status = "перекуплен" if rsi_1h > 70 else "перепродан" if rsi_1h < 30 else "нейтрален"
+        rsi_status = "overbought" if rsi_1h > 70 else "oversold" if rsi_1h < 30 else "neutral"
         
         # MACD сигнал
-        macd_signal = "бычий кросс" if ta_weekly['macd_hist'] > 0 else "медвежий кросс"
+        macd_signal = "bullish cross" if ta_weekly['macd_hist'] > 0 else "bearish cross"
         
         # Позиция в EMA
         price = ta_weekly['current_price']
-        ema_position = "выше" if price > ta_weekly['ema20'] else "ниже"
+        ema_position = "above" if price > ta_weekly['ema20'] else "below"
         
         # BB позиция
         bb_pos = ta_weekly['bb_position']
-        bb_zone = "верхней зоне" if bb_pos > 80 else "нижней зоне" if bb_pos < 20 else "средней зоне"
+        bb_zone = "upper band" if bb_pos > 80 else "lower band" if bb_pos < 20 else "mid-range"
         
-        context = f"""
-📊 ТЕХНИЧЕСКИЙ АНАЛИЗ BTC/USD
+        context = f"""TECHNICAL DATA - BTC/USD
 
-💰 Текущая цена: ${price:,.2f}
+Current Price: ${price:,.2f}
 
-📈 НЕДЕЛЬНЫЙ ПРОГНОЗ (1h/4h таймфрейм):
+Short-Term Structure (1h/4h):
 - RSI(14): {rsi_1h:.1f} ({rsi_status})
 - MACD: {macd_signal}
-- EMA20: ${ta_weekly['ema20']:,.2f} (цена {ema_position})
-- Bollinger Bands: цена в {bb_zone} (позиция {bb_pos:.1f}%)
-- Поддержка: ${ta_weekly['support']:,.2f}
-- Сопротивление: ${ta_weekly['resistance']:,.2f}
-- Тренд: {ta_weekly['trend']}
+- EMA20: ${ta_weekly['ema20']:,.2f} (price {ema_position})
+- Bollinger Bands: price at {bb_zone} (position {bb_pos:.1f}%)
+- Support: ${ta_weekly['support']:,.2f}
+- Resistance: ${ta_weekly['resistance']:,.2f}
+- Trend: {ta_weekly['trend']}
 
-📊 МЕСЯЧНЫЙ ПРОГНОЗ (1d таймфрейм):
+Medium-Term Structure (1d):
 - EMA50: ${ta_monthly['ema50']:,.2f}
 - EMA200: ${ta_monthly['ema200']:,.2f}
-- Тренд: {ta_monthly['trend']}
-- Поддержка: ${ta_monthly['support']:,.2f}
-- Сопротивление: ${ta_monthly['resistance']:,.2f}
+- Trend: {ta_monthly['trend']}
+- Support: ${ta_monthly['support']:,.2f}
+- Resistance: ${ta_monthly['resistance']:,.2f}
 
-📈 ГОДОВОЙ ПРОГНОЗ (1w таймфрейм):
+Long-Term Structure (1w):
 - MA200: ${ta_yearly['ema200']:,.2f}
-- Долгосрочный тренд: {ta_yearly['trend']}
+- Long-term trend: {ta_yearly['trend']}
 
-🌐 МАКРОЭКОНОМИКА:"""
+MACRO CONTEXT:"""
         
         if sp500_data['current_price']:
             context += f"""
-- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% за месяц)"""
+- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)"""
         
         if correlation is not None:
-            corr_strength = "сильная" if abs(correlation) > 0.7 else "умеренная" if abs(correlation) > 0.4 else "слабая"
+            corr_strength = "strong" if abs(correlation) > 0.7 else "moderate" if abs(correlation) > 0.4 else "weak"
             context += f"""
-- Корреляция BTC-SPX (30d): {correlation:.2f} ({corr_strength})"""
+- BTC-SPX correlation (30d): {correlation:.2f} ({corr_strength})"""
         
         if macro_data['fed_rate']:
             context += f"""
-- Ставка ФРС: {macro_data['fed_rate']:.2f}%"""
+- Federal Funds Rate: {macro_data['fed_rate']:.2f}%"""
         
         return context
     
@@ -519,29 +535,15 @@ class BTCForecastBot:
         """
         current_price = ta_weekly['current_price']
         
-        # Эмодзи для тренда
-        trend_emoji = {
-            'сильный восходящий': '🚀',
-            'восходящий': '📈',
-            'боковой': '➡️',
-            'нисходящий': '📉',
-            'сильный нисходящий': '🔻'
-        }
-        
-        emoji = trend_emoji.get(ta_weekly['trend'], '📊')
-        
-        message = f"""
-{emoji} <b>BTC ПРОГНОЗ</b> {emoji}
+        message = f"""<b>BITCOIN PRICE FORECAST</b>
 
-💰 <b>Текущая цена:</b> ${current_price:,.2f}
-📊 <b>Тренд:</b> {ta_weekly['trend']}
-🎯 <b>Поддержка:</b> ${ta_weekly['support']:,.0f}
-🎯 <b>Сопротивление:</b> ${ta_weekly['resistance']:,.0f}
+<b>Current Price:</b> ${current_price:,.2f}
+<b>Support:</b> ${ta_weekly['support']:,.0f} | <b>Resistance:</b> ${ta_weekly['resistance']:,.0f}
 
 {forecast}
 
-<i>🤖 Автоматический анализ на основе TA + AI
-⏰ Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M UTC')}</i>
+<i>Automated analysis based on technical data and macro factors
+Updated: {datetime.now().strftime('%d.%m.%Y %H:%M UTC')}</i>
 """
         
         return message
