@@ -4,7 +4,6 @@ yfinance==0.2.36
 
 # Технический анализ
 pandas==2.2.0
-pandas-ta
 numpy==1.26.3
 
 # AI анализ
@@ -19,3 +18,6 @@ fredapi==0.5.1
 # Утилиты
 python-dotenv==1.0.0
 requests==2.31.0
+
+# pandas-ta из GitHub (не в PyPI)
+git+https://github.com/twopirllc/pandas-ta.git
