@@ -49,7 +49,7 @@ class BTCForecastBot:
         self._validate_config()
         
         # Инициализация клиентов
-        self.exchange = ccxt.binance()
+        self.exchange = ccxt.kraken()
         self.openai_client = OpenAI(api_key=self.openai_api_key)
         self.telegram_bot = Bot(token=self.telegram_token)
         
@@ -87,7 +87,7 @@ class BTCForecastBot:
         try:
             logger.info(f"Получение данных BTC/{timeframe} (limit={limit})")
             
-            ohlcv = self.exchange.fetch_ohlcv('BTC/USDT', timeframe, limit=limit)
+            ohlcv = self.exchange.fetch_ohlcv('BTC/USD', timeframe, limit=limit)
             
             df = pd.DataFrame(
                 ohlcv, 
