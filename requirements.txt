@@ -5,6 +5,7 @@ yfinance==0.2.36
 # Технический анализ
 pandas==2.2.0
 numpy==1.26.3
+ta==0.11.0
 
 # AI анализ
 openai==1.12.0
@@ -15,9 +16,9 @@ python-telegram-bot==20.7
 # Макроэкономические данные
 fredapi==0.5.1
 
+# Retry механизм для надежности
+tenacity==9.0.0
+
 # Утилиты
 python-dotenv==1.0.0
 requests==2.31.0
-
-# pandas-ta из GitHub (не в PyPI)
-git+https://github.com/twopirllc/pandas-ta.git
