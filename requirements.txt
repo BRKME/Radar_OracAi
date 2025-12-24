@@ -4,7 +4,7 @@ yfinance==0.2.36
 
 # Технический анализ
 pandas==2.2.0
-pandas-ta==0.3.14b0
+pandas-ta
 numpy==1.26.3
 
 # AI анализ
