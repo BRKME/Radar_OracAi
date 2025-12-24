@@ -12,7 +12,7 @@ import logging
 import ccxt
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 import numpy as np
 from openai import OpenAI
 from fredapi import Fred
@@ -115,34 +115,75 @@ class BTCForecastBot:
         """
         try:
             # RSI
-            df.ta.rsi(length=14, append=True)
-            rsi = df['RSI_14'].iloc[-1]
+            rsi_indicator = ta.momentum.RSIIndicator(close=df['close'], window=14)
+            df['rsi'] = rsi_indicator.rsi()
+            rsi = df['rsi'].iloc[-1]
+            if pd.isna(rsi):
+                logger.warning("RSI is NaN, using neutral value 50")
+                rsi = 50.0
             
             # MACD
-            df.ta.macd(fast=12, slow=26, signal=9, append=True)
-            macd = df['MACD_12_26_9'].iloc[-1]
-            macd_signal = df['MACDs_12_26_9'].iloc[-1]
-            macd_hist = df['MACDh_12_26_9'].iloc[-1]
+            macd_indicator = ta.trend.MACD(close=df['close'], window_slow=26, window_fast=12, window_sign=9)
+            df['macd'] = macd_indicator.macd()
+            df['macd_signal'] = macd_indicator.macd_signal()
+            df['macd_hist'] = macd_indicator.macd_diff()
+            macd = df['macd'].iloc[-1]
+            macd_signal = df['macd_signal'].iloc[-1]
+            macd_hist = df['macd_hist'].iloc[-1]
+            
+            # Заменяем NaN на 0 для MACD
+            if pd.isna(macd):
+                macd = 0.0
+            if pd.isna(macd_signal):
+                macd_signal = 0.0
+            if pd.isna(macd_hist):
+                macd_hist = 0.0
             
             # EMA
-            df.ta.ema(length=20, append=True)
-            df.ta.ema(length=50, append=True)
-            df.ta.ema(length=200, append=True)
-            ema20 = df['EMA_20'].iloc[-1]
-            ema50 = df['EMA_50'].iloc[-1]
-            ema200 = df['EMA_200'].iloc[-1]
+            ema20_indicator = ta.trend.EMAIndicator(close=df['close'], window=20)
+            ema50_indicator = ta.trend.EMAIndicator(close=df['close'], window=50)
+            ema200_indicator = ta.trend.EMAIndicator(close=df['close'], window=200)
+            df['ema20'] = ema20_indicator.ema_indicator()
+            df['ema50'] = ema50_indicator.ema_indicator()
+            df['ema200'] = ema200_indicator.ema_indicator()
+            ema20 = df['ema20'].iloc[-1]
+            ema50 = df['ema50'].iloc[-1]
+            ema200 = df['ema200'].iloc[-1]
+            
+            # Fallback для EMA если NaN
+            current_price = df['close'].iloc[-1]
+            if pd.isna(ema20):
+                logger.warning("EMA20 is NaN, using current price")
+                ema20 = current_price
+            if pd.isna(ema50):
+                logger.warning("EMA50 is NaN, using EMA20 or current price")
+                ema50 = ema20 if not pd.isna(ema20) else current_price
+            if pd.isna(ema200):
+                logger.warning("EMA200 is NaN, using EMA50 or current price")
+                ema200 = ema50 if not pd.isna(ema50) else current_price
             
             # Bollinger Bands
-            df.ta.bbands(length=20, std=2, append=True)
-            bb_upper = df['BBU_20_2.0'].iloc[-1]
-            bb_middle = df['BBM_20_2.0'].iloc[-1]
-            bb_lower = df['BBL_20_2.0'].iloc[-1]
+            bb_indicator = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
+            df['bb_upper'] = bb_indicator.bollinger_hband()
+            df['bb_middle'] = bb_indicator.bollinger_mavg()
+            df['bb_lower'] = bb_indicator.bollinger_lband()
+            bb_upper = df['bb_upper'].iloc[-1]
+            bb_middle = df['bb_middle'].iloc[-1]
+            bb_lower = df['bb_lower'].iloc[-1]
             
-            # Текущая цена
-            current_price = df['close'].iloc[-1]
+            # Fallback для BB если NaN
+            if pd.isna(bb_upper) or pd.isna(bb_middle) or pd.isna(bb_lower):
+                logger.warning("Bollinger Bands contain NaN, using price-based defaults")
+                bb_middle = current_price
+                bb_upper = current_price * 1.02  # +2%
+                bb_lower = current_price * 0.98  # -2%
             
-            # Позиция цены в BB
-            bb_position = ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100
+            # Позиция цены в BB (с защитой от деления на ноль)
+            if bb_upper != bb_lower:
+                bb_position = ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100
+            else:
+                bb_position = 50.0  # Нейтральная позиция при отсутствии волатильности
+                logger.warning("BB bands are equal, using neutral position")
             
             # Анализ тренда
             trend = self._analyze_trend(df)
@@ -177,9 +218,9 @@ class BTCForecastBot:
     def _analyze_trend(self, df: pd.DataFrame) -> str:
         """Определение тренда на основе EMA"""
         current_price = df['close'].iloc[-1]
-        ema20 = df['EMA_20'].iloc[-1]
-        ema50 = df['EMA_50'].iloc[-1]
-        ema200 = df['EMA_200'].iloc[-1]
+        ema20 = df['ema20'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        ema200 = df['ema200'].iloc[-1]
         
         if current_price > ema20 > ema50 > ema200:
             return "сильный восходящий"
@@ -216,6 +257,14 @@ class BTCForecastBot:
             logger.info("Получение данных S&P 500")
             
             sp500 = yf.download('^GSPC', period='3mo', progress=False)
+            
+            # Проверка на пустой DataFrame
+            if sp500.empty or len(sp500) == 0:
+                logger.warning("S&P 500 data is empty, skipping")
+                return {
+                    'current_price': None,
+                    'change_1m': None
+                }
             
             current_price = sp500['Close'].iloc[-1]
             price_1m_ago = sp500['Close'].iloc[-30] if len(sp500) >= 30 else sp500['Close'].iloc[0]
@@ -281,7 +330,9 @@ class BTCForecastBot:
             
             sp500 = yf.download('^GSPC', start=start_date, end=end_date, progress=False)
             
-            if len(sp500) < 10:
+            # Проверка на пустой DataFrame
+            if sp500.empty or len(sp500) < 20:
+                logger.warning(f"S&P 500 data insufficient for correlation: {len(sp500) if not sp500.empty else 0} rows")
                 return None
             
             # Приводим к дневным данным для корреляции
@@ -294,7 +345,9 @@ class BTCForecastBot:
                 'sp500': sp500_daily
             }).dropna()
             
-            if len(combined) < 10:
+            # Строгая проверка минимума данных
+            if len(combined) < 20:
+                logger.warning(f"Not enough overlapping data for correlation: {len(combined)} rows (minimum 20 required)")
                 return None
             
             correlation = combined['btc'].corr(combined['sp500'])
@@ -504,6 +557,11 @@ class BTCForecastBot:
         """
         try:
             logger.info(f"Публикация в Telegram канал: {self.channel_id}")
+            
+            # Telegram имеет лимит 4096 символов
+            if len(message) > 4096:
+                logger.warning(f"Message too long ({len(message)} chars), truncating to 4090")
+                message = message[:4090] + "\n..."
             
             self.telegram_bot.send_message(
                 chat_id=self.channel_id,
