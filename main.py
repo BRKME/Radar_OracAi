@@ -16,8 +16,7 @@ import ta
 import numpy as np
 from openai import OpenAI
 from fredapi import Fred
-from telegram import Bot
-from telegram.constants import ParseMode
+import requests
 from dotenv import load_dotenv
 
 # Настройка логирования
@@ -51,7 +50,6 @@ class BTCForecastBot:
         # Инициализация клиентов
         self.exchange = ccxt.kraken()
         self.openai_client = OpenAI(api_key=self.openai_api_key)
-        self.telegram_bot = Bot(token=self.telegram_token)
         
         if self.fred_api_key:
             self.fred = Fred(api_key=self.fred_api_key)
@@ -467,7 +465,7 @@ class BTCForecastBot:
         bb_zone = "верхней зоне" if bb_pos > 80 else "нижней зоне" if bb_pos < 20 else "средней зоне"
         
         context = f"""
-📊 ТЕХНИЧЕСКИЙ АНАЛИЗ BTC/USDT
+📊 ТЕХНИЧЕСКИЙ АНАЛИЗ BTC/USD
 
 💰 Текущая цена: ${price:,.2f}
 
@@ -563,13 +561,23 @@ class BTCForecastBot:
                 logger.warning(f"Message too long ({len(message)} chars), truncating to 4090")
                 message = message[:4090] + "\n..."
             
-            self.telegram_bot.send_message(
-                chat_id=self.channel_id,
-                text=message,
-                parse_mode=ParseMode.HTML
-            )
+            # Отправка через Telegram Bot API напрямую
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+            payload = {
+                'chat_id': self.channel_id,
+                'text': message,
+                'parse_mode': 'HTML'
+            }
             
-            logger.info("Сообщение успешно опубликовано")
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get('ok'):
+                logger.info("Сообщение успешно опубликовано")
+            else:
+                logger.error(f"Telegram API error: {result}")
+                raise Exception(f"Telegram API returned ok=false: {result}")
             
         except Exception as e:
             logger.error(f"Ошибка публикации в Telegram: {e}")
