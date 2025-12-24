@@ -1,0 +1,48 @@
+name: BTC Forecast Daily
+
+# Опциональный workflow для ежедневных прогнозов
+# Чтобы активировать, раскомментируйте секцию schedule
+
+on:
+  # Раскомментируйте для ежедневных прогнозов в 09:00 UTC
+  # schedule:
+  #   - cron: '0 9 * * *'
+  
+  # Возможность запуска вручную
+  workflow_dispatch:
+
+jobs:
+  daily-forecast:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run BTC Forecast Bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python main.py
+      
+      - name: Report Success
+        if: success()
+        run: echo "✅ Ежедневный BTC Forecast опубликован"
+      
+      - name: Report Failure
+        if: failure()
+        run: echo "❌ Ошибка при публикации ежедневного BTC Forecast"
