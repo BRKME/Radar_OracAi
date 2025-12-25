@@ -358,6 +358,147 @@ class BTCForecastBot:
             logger.error(f"Ошибка расчета корреляции: {e}")
             return None
     
+    def fetch_eth_data(self, timeframe: str, limit: int) -> pd.DataFrame:
+        """
+        Получение исторических данных ETH
+        
+        Args:
+            timeframe: Таймфрейм (1h, 4h, 1d, 1w)
+            limit: Количество свечей
+        
+        Returns:
+            DataFrame с OHLCV данными
+        """
+        try:
+            logger.info(f"Получение данных ETH/{timeframe} (limit={limit})")
+            
+            ohlcv = self.exchange.fetch_ohlcv('ETH/USD', timeframe, limit=limit)
+            
+            df = pd.DataFrame(
+                ohlcv, 
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            logger.info(f"Получено {len(df)} свечей ETH для {timeframe}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения данных ETH: {e}")
+            raise
+    
+    def validate_market_data(self, df: pd.DataFrame, symbol: str, min_hours: int) -> bool:
+        """
+        Валидация рыночных данных
+        
+        Args:
+            df: DataFrame с данными
+            symbol: Символ актива (для логирования)
+            min_hours: Минимальное количество часов данных
+        
+        Returns:
+            True если данные валидны, False если нет
+        """
+        if df.empty:
+            logger.error(f"{symbol} dataset is empty")
+            return False
+        
+        if len(df) < min_hours:
+            logger.error(f"{symbol} insufficient data: {len(df)}h < {min_hours}h required")
+            return False
+        
+        if df['close'].isna().any():
+            logger.error(f"{symbol} contains NaN values in close prices")
+            return False
+        
+        if (df['close'] <= 0).any():
+            logger.error(f"{symbol} contains invalid prices (<=0)")
+            return False
+        
+        return True
+    
+    def check_eth_post_conditions(
+        self, 
+        eth_df_1h: pd.DataFrame,
+        btc_df_1h: pd.DataFrame
+    ) -> Tuple[bool, str]:
+        """
+        Проверка условий для отдельного поста по ETH
+        
+        Условия:
+        1. ETH ведёт рынок (ETH/BTC растёт, ETH волатильнее)
+        2. Есть собственный поток капитала
+        3. Структурное событие
+        4. Нарративный сдвиг
+        
+        Args:
+            eth_df_1h: DataFrame с данными ETH 1h
+            btc_df_1h: DataFrame с данными BTC 1h
+        
+        Returns:
+            (should_post, reason)
+        """
+        try:
+            logger.info("Проверка условий для ETH поста")
+            
+            # Валидация входных данных
+            MIN_HOURS_7D = 168  # 7 days
+            MIN_HOURS_24H = 24  # 1 day
+            
+            if not self.validate_market_data(eth_df_1h, "ETH", MIN_HOURS_7D):
+                return (False, "Invalid ETH data - insufficient or corrupt")
+            
+            if not self.validate_market_data(btc_df_1h, "BTC", MIN_HOURS_7D):
+                return (False, "Invalid BTC data - insufficient or corrupt")
+            
+            # Условие 1: ETH ведёт рынок
+            # Проверяем ETH/BTC ratio за последние 7 дней
+            # Используем среднее 3 последних свечей для стабильности
+            eth_price_now = eth_df_1h['close'].iloc[-3:].mean()
+            btc_price_now = btc_df_1h['close'].iloc[-3:].mean()
+            eth_price_7d = eth_df_1h['close'].iloc[-MIN_HOURS_7D:-MIN_HOURS_7D+3].mean()
+            btc_price_7d = btc_df_1h['close'].iloc[-MIN_HOURS_7D:-MIN_HOURS_7D+3].mean()
+            
+            eth_btc_ratio_now = eth_price_now / btc_price_now
+            eth_btc_ratio_7d_ago = eth_price_7d / btc_price_7d
+            
+            eth_btc_change = ((eth_btc_ratio_now / eth_btc_ratio_7d_ago) - 1) * 100
+            
+            if eth_btc_change > 2.0:  # ETH/BTC вырос >2% за неделю
+                reason = f"ETH/BTC ratio up {eth_btc_change:.1f}% (7d) - ETH leading market"
+                logger.info(f"ETH post condition met: {reason}")
+                return (True, reason)
+            
+            # Проверяем волатильность за последние 24 часа
+            eth_volatility_24h = eth_df_1h['close'].iloc[-MIN_HOURS_24H:].pct_change().std() * 100
+            btc_volatility_24h = btc_df_1h['close'].iloc[-MIN_HOURS_24H:].pct_change().std() * 100
+            
+            # BUG FIX: Check for NaN volatility before comparison
+            if pd.notna(eth_volatility_24h) and pd.notna(btc_volatility_24h):
+                if eth_volatility_24h > btc_volatility_24h * 1.5:  # ETH волатильнее на 50%+
+                    reason = f"ETH volatility {eth_volatility_24h:.2f}% vs BTC {btc_volatility_24h:.2f}% (24h) - independent movement"
+                    logger.info(f"ETH post condition met: {reason}")
+                    return (True, reason)
+            else:
+                logger.warning(f"Volatility calculation returned NaN - skipping volatility check")
+            
+            # Проверяем divergence: BTC flat, ETH движется
+            btc_change_24h = ((btc_df_1h['close'].iloc[-1] / btc_df_1h['close'].iloc[-MIN_HOURS_24H]) - 1) * 100
+            eth_change_24h = ((eth_df_1h['close'].iloc[-1] / eth_df_1h['close'].iloc[-MIN_HOURS_24H]) - 1) * 100
+            
+            if abs(btc_change_24h) < 1.0 and abs(eth_change_24h) > 3.0:  # BTC <1%, ETH >3%
+                reason = f"Divergence: BTC {btc_change_24h:+.1f}%, ETH {eth_change_24h:+.1f}% (24h)"
+                logger.info(f"ETH post condition met: {reason}")
+                return (True, reason)
+            
+            logger.info("ETH post conditions not met - skipping separate ETH forecast")
+            return (False, "No significant ETH-specific catalyst")
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки ETH условий: {e}")
+            return (False, f"Error checking conditions: {e}")
+    
     def generate_ai_forecast(
         self,
         ta_weekly: Dict,
@@ -405,11 +546,12 @@ If your view significantly diverges from institutional consensus, acknowledge th
 
 LANGUAGE RULES (STRICT):
 * Maximum 1 sentence per horizon
-* NO explanatory words: ❌ "due to", "reflecting", "caused by", "amid"
+* NO explanatory words: ❌ "due to", "reflecting", "caused by", "amid", "determines", "tests"
 * NO technical indicator names (RSI, MACD, EMA, Bollinger, etc.)
 * NO evaluative adjectives ("strong", "weak", "significant")
 * NO emotional or optimistic language
 * NO bullish/bearish balance rhetoric
+* NO narrative language ("tests narrative", "challenges story")
 
 ALLOWED vocabulary (market state only):
 * "trades within range"
@@ -418,6 +560,7 @@ ALLOWED vocabulary (market state only):
 * "defines upper/lower boundary"
 * "assumes continuation"
 * "indicates sustained"
+* "anchors", "implies", "challenges assumptions", "shifts expectations"
 
 RANGES & PROBABILITIES:
 * Only ranges, never point targets
@@ -425,7 +568,7 @@ RANGES & PROBABILITIES:
 * No categorical statements
 * Only dominant scenario described
 
-STRUCTURE (1 SENTENCE EACH):
+STRUCTURE:
 
 SHORT-TERM VIEW:
 [Price range, boundary conditions, break requirement] - ONE sentence.
@@ -436,27 +579,21 @@ MEDIUM-TERM VIEW:
 LONG-TERM VIEW:
 [Price corridor, key variable, scenario bounds] - ONE sentence.
 
-RISK FRAMING (2-3 SENTENCES):
-Identify specific macro risks with concrete US events/data:
-* Federal Reserve: Next FOMC meeting date, current rate expectations, QE/QT status
-* Inflation: Next CPI/PCE release date, current trajectory
-* Employment: Next NFP date, jobless claims trend
-* Banking/Credit: Stress indicators, liquidity conditions
-* Geopolitical: Specific events with date impact
-* Regulation: Pending crypto legislation, SEC actions
+RISK FRAMING (2-3 SENTENCES MAX):
+Identify specific macro catalysts with dates and implications. Only facts and market implications, no narrative language.
 
-Format: 
-- Sentence 1: Primary macro catalyst with specific date/event
-- Sentence 2: Secondary risk factor with measurement
-- Sentence 3 (optional): Tail risk scenario
+Key events to reference:
+* Federal Reserve: Next FOMC meeting date, rate expectations, QE/QT status
+* Inflation: Next CPI/PCE release date, threshold levels
+* Employment: Next NFP date, unemployment threshold
+* Banking/Credit: Specific stress metrics, liquidity levels
+* Geopolitical: Dated events with market impact
+* Regulation: Specific SEC actions, legislation dates
 
-Example:
-FOMC decision Dec 18 determines near-term trajectory, current pricing implies 25bp hold. 
-CPI print Jan 15 tests disinflation narrative, deviation above 3.5% resets rate path. 
-Banking sector stress resurfaces if regional deposit outflows exceed $50B weekly.
-
-CONTEXT:
-[Strength] [Sentiment]
+Format (cold, factual):
+FOMC (Dec 18) anchors near-term rates; pricing implies 25bp hold.
+CPI (Jan 15) above 3.5% challenges current rate path assumptions.
+Deposit outflows exceeding $50B weekly trigger liquidity concerns.
 
 INSTITUTIONAL REFERENCE:
 Pick ONE random institution from this list and cite their latest public BTC price target/view (if known):
@@ -480,11 +617,12 @@ Before output, verify:
 1. Can this go into fund morning brief without edits?
 2. Does every sentence work on price?
 3. Can you remove 10% more words without losing meaning?
+4. Is the tone cold and factual, not narrative?
 
 If YES → publish
 If NO → compress further
 
-EXAMPLE (GOOD):
+EXAMPLE (PERFECT):
 SHORT-TERM VIEW:
 Price trades $86,271–$88,548, break above requires sustained bid.
 
@@ -495,17 +633,14 @@ LONG-TERM VIEW:
 Corridor $70,000–$102,000 sensitive to policy trajectory.
 
 RISK FRAMING:
-FOMC decision Dec 18 determines near-term trajectory, current pricing implies 25bp hold. 
-CPI print Jan 15 tests disinflation narrative, deviation above 3.5% resets rate path.
-
-CONTEXT:
-Moderate positive
+FOMC (Dec 18) anchors near-term rates; pricing implies 25bp hold.
+CPI (Jan 15) above 3.5% challenges current rate path assumptions.
 
 INSTITUTIONAL REFERENCE:
 Goldman Sachs targets $150K-$200K by end 2025
 
 MAIN RULE:
-Less is more. Every word must earn its place."""
+Less is more. Every word must earn its place. Cold facts over narrative."""
 
             user_prompt = f"""Analyze the following data and provide institutional price forecast:
 
@@ -601,6 +736,120 @@ MACRO BACKDROP:"""
 - Monetary policy: data unavailable"""
         
         return context
+    
+    def generate_eth_forecast(
+        self,
+        ta_weekly: Dict,
+        ta_monthly: Dict,
+        ta_yearly: Dict,
+        eth_btc_context: str,
+        macro_data: Dict
+    ) -> str:
+        """
+        Генерация AI прогноза для ETH
+        
+        Args:
+            ta_weekly: Технический анализ для недельного прогноза
+            ta_monthly: Технический анализ для месячного прогноза
+            ta_yearly: Технический анализ для годового прогноза
+            eth_btc_context: Контекст ETH/BTC positioning
+            macro_data: Макроэкономические данные
+        
+        Returns:
+            Текст AI прогноза для ETH
+        """
+        try:
+            logger.info("Генерация AI прогноза для ETH")
+            
+            price = ta_weekly['current_price']
+            
+            context = f"""MARKET DATA - ETH/USD
+
+Current Price: ${price:,.2f}
+Support: ${ta_weekly['support']:,.2f} | Resistance: ${ta_weekly['resistance']:,.2f}
+Trend: {ta_weekly['trend']}
+
+ETH-SPECIFIC CONTEXT:
+{eth_btc_context}
+
+MACRO BACKDROP:
+- Federal Funds Rate: {macro_data.get('fed_rate', 'N/A')}%"""
+
+            # Используем почти тот же system_prompt что и для BTC
+            system_prompt = """ROLE:
+You are a senior buy-side strategist focusing on ETHEREUM. Output goes directly into institutional brief.
+
+LANGUAGE RULES (STRICT):
+* Maximum 1 sentence per horizon
+* NO explanatory words: ❌ "due to", "reflecting", "caused by", "determines", "tests"
+* NO technical indicator names
+* NO evaluative adjectives
+* NO emotional language
+* NO narrative language
+
+ALLOWED vocabulary:
+* "trades within range", "capped above/supported below"
+* "requires break above/below"
+* "anchors", "implies", "challenges assumptions"
+
+ETH-SPECIFIC FACTORS:
+* ETH/BTC positioning and ratio dynamics
+* ETF flows and institutional allocation
+* Staking yield and supply dynamics
+* Layer 2 ecosystem value capture
+* Regulatory status (commodity vs security)
+
+STRUCTURE:
+
+SHORT-TERM VIEW:
+[Price range, conditions] - ONE sentence.
+
+MEDIUM-TERM VIEW:
+[Price range, factors] - ONE sentence.
+
+LONG-TERM VIEW:
+[Price corridor, key variable] - ONE sentence.
+
+RISK FRAMING (2 SENTENCES MAX):
+ETH-specific risks with facts and dates. Cold, factual tone only.
+
+INSTITUTIONAL REFERENCE (OPTIONAL):
+[Institution] targets $X-$Y by [timeframe]
+
+QUALITY FILTER:
+1. Fund morning brief quality?
+2. Every sentence on price?
+3. Can remove 10% more words?
+4. Cold and factual?
+
+MAIN RULE:
+Less is more. Cold facts over narrative."""
+
+            user_prompt = f"""Analyze ETHEREUM data and provide institutional forecast:
+
+{context}
+
+Provide forecast in specified format."""
+
+            # Запрос к GPT
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=800
+            )
+            
+            forecast = response.choices[0].message.content.strip()
+            
+            logger.info("ETH прогноз успешно сгенерирован")
+            return forecast
+            
+        except Exception as e:
+            logger.error(f"Ошибка генерации ETH прогноза: {e}")
+            raise
     
     def format_telegram_message(self, ta_weekly: Dict, forecast: str) -> str:
         """
@@ -792,8 +1041,60 @@ MACRO BACKDROP:"""
             chart_path = None
             
             # 9. Публикуем в Telegram
-            logger.info("Шаг 9: Публикация в Telegram")
+            logger.info("Шаг 9: Публикация BTC прогноза в Telegram")
             self.publish_to_telegram(message, chart_path)
+            
+            # 10. Проверяем условия для ETH поста
+            logger.info("Шаг 10: Проверка условий для отдельного ETH прогноза")
+            try:
+                # Получаем данные ETH
+                eth_df_1h = self.fetch_eth_data('1h', limit=168)
+                
+                # Проверяем условия
+                should_post_eth, eth_reason = self.check_eth_post_conditions(eth_df_1h, df_1h)
+                
+                if should_post_eth:
+                    logger.info(f"ETH условия выполнены: {eth_reason}")
+                    
+                    # 11. Получаем данные ETH для разных таймфреймов
+                    logger.info("Шаг 11: Получение данных ETH для анализа")
+                    eth_df_1d = self.fetch_eth_data('1d', limit=90)
+                    eth_df_1w = self.fetch_eth_data('1w', limit=52)
+                    
+                    # 12. Рассчитываем технические индикаторы для ETH
+                    logger.info("Шаг 12: Расчет технических индикаторов ETH")
+                    eth_ta_weekly = self.calculate_technical_indicators(eth_df_1h)
+                    eth_ta_monthly = self.calculate_technical_indicators(eth_df_1d)
+                    eth_ta_yearly = self.calculate_technical_indicators(eth_df_1w)
+                    
+                    # 13. Генерируем ETH прогноз
+                    logger.info("Шаг 13: Генерация AI прогноза для ETH")
+                    eth_forecast = self.generate_eth_forecast(
+                        eth_ta_weekly, 
+                        eth_ta_monthly, 
+                        eth_ta_yearly,
+                        eth_reason,  # Используем reason как контекст
+                        macro_data
+                    )
+                    
+                    # 14. Форматируем и публикуем ETH прогноз
+                    logger.info("Шаг 14: Публикация ETH прогноза в Telegram")
+                    eth_message = f"""<b>ETHEREUM PRICE FORECAST</b>
+
+<b>Current:</b> ${eth_ta_weekly['current_price']:,.0f}
+<b>Support:</b> ${eth_ta_weekly['support']:,.0f} | <b>Resistance:</b> ${eth_ta_weekly['resistance']:,.0f}
+
+{eth_forecast}
+
+<i>OracAI-assisted analysis | Not financial advice | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
+"""
+                    self.publish_to_telegram(eth_message, None)
+                    logger.info("✅ ETH прогноз успешно опубликован")
+                else:
+                    logger.info(f"ETH условия не выполнены: {eth_reason}")
+                    
+            except Exception as e:
+                logger.warning(f"Ошибка при обработке ETH: {e}. Продолжаем без ETH прогноза.")
             
             logger.info("=" * 50)
             logger.info("BTC Forecast Bot завершил работу успешно!")
