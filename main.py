@@ -8,6 +8,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import logging
+# import tempfile  # Not needed - TradingView scraping disabled for compliance
 
 import ccxt
 import yfinance as yf
@@ -18,6 +19,7 @@ from openai import OpenAI
 from fredapi import Fred
 import requests
 from dotenv import load_dotenv
+# from playwright.sync_api import sync_playwright  # Not needed - TradingView scraping disabled
 
 # Настройка логирования
 logging.basicConfig(
@@ -405,7 +407,7 @@ CRITICAL - WHEN DESCRIBING REASONS:
    "consolidation below EMA50"
    "price at upper Bollinger Band"
    "MACD showing bearish cross"
-❌ INSTEAD use generic descriptors:
+✅ INSTEAD use generic descriptors:
    "consolidation below key resistance levels"
    "price at upper range boundary"
    "momentum deterioration"
@@ -416,20 +418,30 @@ MANDATORY:
 * Macro + liquidity + price behavior context
 * Analytical memo language
 * Professional institutional tone
+* OCCAM'S RAZOR PRINCIPLE: Simplest explanations preferred. Avoid multi-factor constructions. Direct conclusions over multi-step logic.
 
 FIXED STRUCTURE:
 
-SHORT-TERM VIEW (1 week):
+SHORT-TERM VIEW:
 Price expected to trade within $X–$Y range, reflecting [reason without indicator names]. Break above/below $Z requires [condition], otherwise movement remains vulnerable to [risk].
 
-MEDIUM-TERM VIEW (1 month):
+MEDIUM-TERM VIEW:
 Base case assumes range-bound trading between $X–$Y, with upside capped by [factor without indicators] and downside supported by [factor]. Sustained breakout requires [catalyst].
 
-LONG-TERM VIEW (1 year):
+LONG-TERM VIEW:
 Annual outlook remains sensitive to [key variable], forming wide corridor $X–$Y. Upper bound assumes [conditions], while lower bound reflects scenario of [structural risk].
 
 RISK FRAMING:
 Key risk to outlook — [factor], capable of disrupting current supply-demand structure.
+
+CONTEXT:
+[Strength] [Sentiment]
+
+Where:
+- Sentiment: Neutral / Negative / Positive / Critical / Hype
+- Strength: Low / Medium / High / Moderate / Strong
+- Format: "[Strength] [Sentiment]" (e.g., "Strong positive", "Moderate negative", "Low neutral")
+- Determine based on overall forecast tone and price expectations
 
 STYLE:
 * Cold, confident, emotion-free
@@ -547,24 +559,95 @@ MACRO BACKDROP:"""
         """
         current_price = ta_weekly['current_price']
         
+        # Обязательный финансовый disclaimer для регуляторного соответствия
+        disclaimer = """
+━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ <b>DISCLAIMER</b>
+
+This analysis is for <b>informational purposes only</b>. 
+It does NOT constitute financial, investment, or trading advice.
+
+• Cryptocurrency markets are highly volatile and risky
+• Past performance does not indicate future results  
+• This is NOT a recommendation to buy or sell
+• Always do your own research (DYOR)
+• Consult a licensed financial advisor before investing
+• We assume NO liability for your trading decisions
+
+By reading this, you acknowledge these risks.
+━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        
         message = f"""<b>BITCOIN PRICE FORECAST</b>
 
-<b>Current:</b> ${current_price:,.2f}
+<b>Current:</b> ${current_price:,.0f}
 <b>Support:</b> ${ta_weekly['support']:,.0f} | <b>Resistance:</b> ${ta_weekly['resistance']:,.0f}
 
 {forecast}
 
-<i>Systematic analysis | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
+{disclaimer}
+
+<i>AI-assisted analysis | Not financial advice | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
 """
         
         return message
     
-    def publish_to_telegram(self, message: str):
+    def generate_tradingview_chart(self) -> Optional[str]:
+        """
+        Генерация скриншота графика TradingView
+        
+        Returns:
+            Путь к файлу скриншота или None при ошибке
+        """
+        try:
+            logger.info("Генерация скриншота TradingView")
+            
+            with sync_playwright() as p:
+                # Запуск браузера в headless режиме с user-agent
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
+                )
+                page = browser.new_page(viewport={'width': 1200, 'height': 800})
+                
+                # Открываем TradingView график BTC/USD
+                url = "https://www.tradingview.com/chart/?symbol=BITSTAMP%3ABTCUSD&interval=D"
+                page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                
+                # Ждем загрузки графика (ищем canvas элемент)
+                try:
+                    page.wait_for_selector('canvas', timeout=10000)
+                    page.wait_for_timeout(2000)  # Дополнительная пауза для рендеринга
+                    logger.info("График TradingView загружен")
+                except Exception as wait_error:
+                    logger.warning(f"Canvas не найден, делаем скриншот anyway: {wait_error}")
+                    page.wait_for_timeout(3000)  # Fallback timeout
+                
+                # Создаем временный файл для скриншота
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                screenshot_path = temp_file.name
+                temp_file.close()
+                
+                # Делаем скриншот
+                page.screenshot(path=screenshot_path, full_page=False)
+                
+                browser.close()
+                
+                logger.info(f"Скриншот сохранен: {screenshot_path}")
+                return screenshot_path
+                
+        except Exception as e:
+            logger.error(f"Ошибка генерации скриншота TradingView: {e}")
+            return None
+            return None
+    
+    def publish_to_telegram(self, message: str, chart_path: Optional[str] = None):
         """
         Публикация сообщения в Telegram канал
         
         Args:
             message: Текст сообщения
+            chart_path: Путь к файлу графика (опционально)
         """
         try:
             logger.info(f"Публикация в Telegram канал: {self.channel_id}")
@@ -574,7 +657,36 @@ MACRO BACKDROP:"""
                 logger.warning(f"Message too long ({len(message)} chars), truncating to 4090")
                 message = message[:4090] + "\n..."
             
-            # Отправка через Telegram Bot API напрямую
+            # Отправка графика если есть
+            if chart_path:
+                try:
+                    url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
+                    
+                    with open(chart_path, 'rb') as photo:
+                        files = {'photo': photo}
+                        payload = {
+                            'chat_id': self.channel_id,
+                            'caption': 'BTC/USD Chart'
+                        }
+                        
+                        response = requests.post(url, data=payload, files=files, timeout=30)
+                        response.raise_for_status()
+                        
+                        logger.info("График успешно отправлен")
+                    
+                    # Удаляем временный файл
+                    if os.path.exists(chart_path):
+                        try:
+                            os.unlink(chart_path)
+                            logger.info(f"Временный файл удален: {chart_path}")
+                        except Exception as cleanup_error:
+                            logger.warning(f"Не удалось удалить временный файл: {cleanup_error}")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка отправки графика: {e}")
+                    # Продолжаем отправку текста даже если график не отправился
+            
+            # Отправка текстового прогноза
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             payload = {
                 'chat_id': self.channel_id,
@@ -638,9 +750,15 @@ MACRO BACKDROP:"""
             logger.info("Шаг 7: Форматирование сообщения")
             message = self.format_telegram_message(ta_weekly, forecast)
             
-            # 8. Публикуем в Telegram
-            logger.info("Шаг 8: Публикация в Telegram")
-            self.publish_to_telegram(message)
+            # 8. Генерация графика ОТКЛЮЧЕНА для compliance
+            # TradingView ToS запрещает автоматический scraping
+            # TODO: Implement local chart generation with matplotlib if needed
+            logger.info("Шаг 8: Генерация графика пропущена (compliance)")
+            chart_path = None
+            
+            # 9. Публикуем в Telegram
+            logger.info("Шаг 9: Публикация в Telegram")
+            self.publish_to_telegram(message, chart_path)
             
             logger.info("=" * 50)
             logger.info("BTC Forecast Bot завершил работу успешно!")
