@@ -1,9 +1,9 @@
-name: BTC Forecast Bot
+name: BTC + ETH Forecast Bot
 
 on:
-  # Запуск по расписанию (каждый понедельник в 12:00 UTC)
+  # Запуск по расписанию (каждый день в 14:00 UTC)
   schedule:
-    - cron: '0 12 * * 1'  # Понедельник 12:00 UTC
+    - cron: '0 14 * * *'  # Ежедневно 14:00 UTC (13:00-15:00 window)
   
   # Возможность запуска вручную
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run BTC Forecast Bot
+      - name: Run BTC + ETH Forecast Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -38,8 +38,8 @@ jobs:
       
       - name: Report Success
         if: success()
-        run: echo "✅ BTC Forecast успешно опубликован"
+        run: echo "✅ BTC Forecast успешно опубликован (+ ETH если условия выполнены)"
       
       - name: Report Failure
         if: failure()
-        run: echo "❌ Ошибка при публикации BTC Forecast"
+        run: echo "❌ Ошибка при публикации Forecast"
