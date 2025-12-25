@@ -221,15 +221,15 @@ class BTCForecastBot:
         ema200 = df['ema200'].iloc[-1]
         
         if current_price > ema20 > ema50 > ema200:
-            return "сильный восходящий"
+            return "strong uptrend"
         elif current_price > ema20 > ema50:
-            return "восходящий"
+            return "uptrend"
         elif current_price < ema20 < ema50 < ema200:
-            return "сильный нисходящий"
+            return "strong downtrend"
         elif current_price < ema20 < ema50:
-            return "нисходящий"
+            return "downtrend"
         else:
-            return "боковой"
+            return "range-bound"
     
     def _calculate_support_resistance(self, df: pd.DataFrame) -> Tuple[float, float]:
         """Расчет уровней поддержки и сопротивления"""
@@ -389,45 +389,55 @@ class BTCForecastBot:
             )
             
             # Промпт для GPT
-            system_prompt = """РОЛЬ:
-Ты — профессиональный крипто-стратег buy-side уровня, формирующий ценовые ожидания для опытных участников рынка. Твоя цель — дать сценарное ценовое ожидание, а не обучение теханализу.
+            system_prompt = """ROLE:
+You are a professional buy-side crypto strategist formulating price expectations for sophisticated market participants. Your goal is to provide scenario-based price outlook, not technical analysis education.
 
-СТРОГО ЗАПРЕЩЕНО:
-* Эмодзи, декоративные блоки
-* Перечисление индикаторов (RSI, MACD, EMA, MA, Stochastic и т.п.)
-* Формулировки вида «вероятность 60%»
-* Объяснение базовых вещей
-* Слова: бычий / медвежий в розничном стиле
-* Фразы «рынок может пойти вверх или вниз»
+STRICTLY FORBIDDEN:
+* Emojis, decorative blocks, retail-style formatting
+* Naming technical indicators (RSI, MACD, EMA, MA, Stochastic, Bollinger Bands, etc.)
+* Phrases like "60% probability" or percentage-based predictions
+* Explaining basic concepts
+* Words: bullish/bearish in retail style
+* Vague statements like "market could go up or down"
 
-ОБЯЗАТЕЛЬНО:
-* Прогноз через сценарии, а не «угадывание»
-* Чёткие ценовые диапазоны
-* Указание условий реализации сценария
-* Макро + ликвидность + поведение цены
-* Язык аналитической записки
+CRITICAL - WHEN DESCRIBING REASONS:
+❌ DO NOT mention technical indicators by name:
+   "consolidation below EMA50"
+   "price at upper Bollinger Band"
+   "MACD showing bearish cross"
+❌ INSTEAD use generic descriptors:
+   "consolidation below key resistance levels"
+   "price at upper range boundary"
+   "momentum deterioration"
 
-СТРУКТУРА (ФИКСИРОВАННАЯ):
+MANDATORY:
+* Scenario-based forecast, not price prediction
+* Clear price ranges with conditions
+* Macro + liquidity + price behavior context
+* Analytical memo language
+* Professional institutional tone
 
-SHORT-TERM VIEW (1 неделя):
-В ближайшую неделю цена, вероятнее всего, останется в диапазоне X–Y, отражая [причина]. Прорыв выше/ниже Z потребует [условие], без чего движение рискует остаться неустойчивым.
+FIXED STRUCTURE:
 
-MEDIUM-TERM VIEW (1 месяц):
-В горизонте месяца базовый сценарий предполагает торговлю в диапазоне X–Y, где рост будет ограничен [фактор], а снижение — поддержано [фактор]. Устойчивый выход из диапазона возможен только при [катализатор].
+SHORT-TERM VIEW (1 week):
+Price expected to trade within $X–$Y range, reflecting [reason without indicator names]. Break above/below $Z requires [condition], otherwise movement remains vulnerable to [risk].
 
-LONG-TERM VIEW (1 год):
-На годовом горизонте цена остаётся чувствительной к [ключевая переменная], что формирует широкий коридор X–Y. Верхняя граница предполагает [условия], тогда как нижняя отражает сценарий [структурный риск].
+MEDIUM-TERM VIEW (1 month):
+Base case assumes range-bound trading between $X–$Y, with upside capped by [factor without indicators] and downside supported by [factor]. Sustained breakout requires [catalyst].
+
+LONG-TERM VIEW (1 year):
+Annual outlook remains sensitive to [key variable], forming wide corridor $X–$Y. Upper bound assumes [conditions], while lower bound reflects scenario of [structural risk].
 
 RISK FRAMING:
-Ключевой риск для сценария — [фактор], способный изменить текущую структуру спроса и предложения.
+Key risk to outlook — [factor], capable of disrupting current supply-demand structure.
 
-СТИЛЬ:
-* Холодный, уверенный, без эмоций
-* Как заметка из morning brief фонда
-* Читатель должен чувствовать: «это писал человек, который видел рынки»
+STYLE:
+* Cold, confident, emotion-free
+* Like morning brief from institutional fund
+* Reader should feel: "this was written by someone who has seen markets"
 
-ГЛАВНОЕ ПРАВИЛО:
-Ты не угадываешь цену. Ты формируешь ожидания и границы неопределённости."""
+MAIN RULE:
+You don't predict price. You frame expectations and boundaries of uncertainty."""
 
             user_prompt = f"""Analyze the following data and provide institutional price forecast:
 
@@ -466,59 +476,61 @@ Provide forecast in the specified format."""
     ) -> str:
         """Формирование контекста для GPT"""
         
-        # RSI интерпретация
-        rsi_1h = ta_weekly['rsi']
-        rsi_status = "overbought" if rsi_1h > 70 else "oversold" if rsi_1h < 30 else "neutral"
-        
-        # MACD сигнал
-        macd_signal = "bullish cross" if ta_weekly['macd_hist'] > 0 else "bearish cross"
-        
-        # Позиция в EMA
         price = ta_weekly['current_price']
-        ema_position = "above" if price > ta_weekly['ema20'] else "below"
         
-        # BB позиция
+        # Простое описание позиции цены без терминологии индикаторов
+        rsi_1h = ta_weekly['rsi']
+        momentum_status = "stretched upside" if rsi_1h > 70 else "oversold" if rsi_1h < 30 else "neutral"
+        
+        macd_trend = "positive" if ta_weekly['macd_hist'] > 0 else "negative"
+        
+        price_vs_ma = "above key moving average" if price > ta_weekly['ema20'] else "below key moving average"
+        
         bb_pos = ta_weekly['bb_position']
-        bb_zone = "upper band" if bb_pos > 80 else "lower band" if bb_pos < 20 else "mid-range"
+        range_position = "upper boundary" if bb_pos > 80 else "lower boundary" if bb_pos < 20 else "mid-range"
         
-        context = f"""TECHNICAL DATA - BTC/USD
+        context = f"""MARKET DATA - BTC/USD
 
 Current Price: ${price:,.2f}
 
-Short-Term Structure (1h/4h):
-- RSI(14): {rsi_1h:.1f} ({rsi_status})
-- MACD: {macd_signal}
-- EMA20: ${ta_weekly['ema20']:,.2f} (price {ema_position})
-- Bollinger Bands: price at {bb_zone} (position {bb_pos:.1f}%)
-- Support: ${ta_weekly['support']:,.2f}
-- Resistance: ${ta_weekly['resistance']:,.2f}
-- Trend: {ta_weekly['trend']}
+Price Structure:
+- Momentum: {momentum_status} ({rsi_1h:.1f})
+- Short-term trend: {macd_trend}
+- Position: {price_vs_ma}
+- Range position: {range_position} ({bb_pos:.1f}%)
+- Immediate support: ${ta_weekly['support']:,.2f}
+- Immediate resistance: ${ta_weekly['resistance']:,.2f}
+- Local trend: {ta_weekly['trend']}
 
-Medium-Term Structure (1d):
-- EMA50: ${ta_monthly['ema50']:,.2f}
-- EMA200: ${ta_monthly['ema200']:,.2f}
-- Trend: {ta_monthly['trend']}
-- Support: ${ta_monthly['support']:,.2f}
-- Resistance: ${ta_monthly['resistance']:,.2f}
+Medium-term levels:
+- Support zone: ${ta_monthly['support']:,.2f}
+- Resistance zone: ${ta_monthly['resistance']:,.2f}
+- Trend character: {ta_monthly['trend']}
 
-Long-Term Structure (1w):
-- MA200: ${ta_yearly['ema200']:,.2f}
-- Long-term trend: {ta_yearly['trend']}
+Long-term context:
+- Major trend: {ta_yearly['trend']}
+- Annual support: ${ta_yearly['support']:,.2f}
+- Annual resistance: ${ta_yearly['resistance']:,.2f}
 
-MACRO CONTEXT:"""
+MACRO BACKDROP:"""
         
         if sp500_data['current_price']:
             context += f"""
-- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)"""
+- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)
+- Risk appetite: {"positive" if sp500_data['change_1m'] > 0 else "negative"}"""
         
         if correlation is not None:
             corr_strength = "strong" if abs(correlation) > 0.7 else "moderate" if abs(correlation) > 0.4 else "weak"
+            corr_direction = "positive" if correlation > 0 else "negative"
             context += f"""
-- BTC-SPX correlation (30d): {correlation:.2f} ({corr_strength})"""
+- BTC-equity correlation: {corr_strength} {corr_direction} ({correlation:.2f})"""
         
         if macro_data['fed_rate']:
             context += f"""
-- Federal Funds Rate: {macro_data['fed_rate']:.2f}%"""
+- Federal Funds Rate: {macro_data['fed_rate']:.2f}% (restrictive territory)"""
+        else:
+            context += f"""
+- Monetary policy: data unavailable"""
         
         return context
     
@@ -537,13 +549,12 @@ MACRO CONTEXT:"""
         
         message = f"""<b>BITCOIN PRICE FORECAST</b>
 
-<b>Current Price:</b> ${current_price:,.2f}
+<b>Current:</b> ${current_price:,.2f}
 <b>Support:</b> ${ta_weekly['support']:,.0f} | <b>Resistance:</b> ${ta_weekly['resistance']:,.0f}
 
 {forecast}
 
-<i>Automated analysis based on technical data and macro factors
-Updated: {datetime.now().strftime('%d.%m.%Y %H:%M UTC')}</i>
+<i>Systematic analysis | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
 """
         
         return message
