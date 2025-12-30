@@ -11,6 +11,7 @@ on:
 jobs:
   forecast:
     runs-on: ubuntu-latest
+    timeout-minutes: 90  # Safety: 1h delay + data processing time
     
     steps:
       - name: Checkout code
