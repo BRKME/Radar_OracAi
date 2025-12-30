@@ -5,6 +5,7 @@ BTC Forecast Bot - MVP Version
 
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import logging
@@ -358,6 +359,51 @@ class BTCForecastBot:
             logger.error(f"Ошибка расчета корреляции: {e}")
             return None
     
+    def calculate_eth_sp500_correlation(self, eth_df: pd.DataFrame) -> Optional[float]:
+        """
+        Расчет корреляции ETH и S&P 500
+        
+        Args:
+            eth_df: DataFrame с данными ETH
+        
+        Returns:
+            Коэффициент корреляции или None
+        """
+        try:
+            # Получаем S&P 500 за тот же период
+            start_date = eth_df.index[0].strftime('%Y-%m-%d')
+            end_date = eth_df.index[-1].strftime('%Y-%m-%d')
+            
+            sp500 = yf.download('^GSPC', start=start_date, end=end_date, progress=False)
+            
+            # Проверка на пустой DataFrame
+            if sp500.empty or len(sp500) < 20:
+                logger.warning(f"S&P 500 data insufficient for ETH correlation: {len(sp500) if not sp500.empty else 0} rows")
+                return None
+            
+            # Приводим к дневным данным для корреляции
+            eth_daily = eth_df['close'].resample('D').last()
+            sp500_daily = sp500['Close']
+            
+            # Объединяем и считаем корреляцию
+            combined = pd.DataFrame({
+                'eth': eth_daily,
+                'sp500': sp500_daily
+            }).dropna()
+            
+            # Строгая проверка минимума данных
+            if len(combined) < 20:
+                logger.warning(f"Not enough overlapping data for ETH correlation: {len(combined)} rows (minimum 20 required)")
+                return None
+            
+            correlation = combined['eth'].corr(combined['sp500'])
+            
+            return correlation
+            
+        except Exception as e:
+            logger.error(f"Ошибка расчета ETH корреляции: {e}")
+            return None
+    
     def fetch_eth_data(self, timeframe: str, limit: int) -> pd.DataFrame:
         """
         Получение исторических данных ETH
@@ -552,9 +598,9 @@ LANGUAGE RULES (STRICT):
 * NO emotional or optimistic language
 * NO bullish/bearish balance rhetoric
 * NO narrative language ("tests narrative", "challenges story")
+* ❌ FORBIDDEN PHRASES: "Price trades", "Price within", "Corridor", "Price range"
 
 ALLOWED vocabulary (market state only):
-* "trades within range"
 * "capped above / supported below"
 * "requires break above/below"
 * "defines upper/lower boundary"
@@ -570,16 +616,21 @@ RANGES & PROBABILITIES:
 
 STRUCTURE:
 
-SHORT-TERM VIEW:
-[Price range, boundary conditions, break requirement] - ONE sentence.
+Short-term view:
+Start with dollar range IMMEDIATELY. Format: "$86,271–$88,548, [conditions]"
+❌ WRONG: "Price trades $86,271–$88,548"
+✅ CORRECT: "$86,271–$88,548, break above requires sustained bid"
 
-MEDIUM-TERM VIEW:
-[Price range, cap/support factors, breakout condition] - ONE sentence.
+Medium-term view:
+Use "Range" ONLY for medium-term. Format: "Range $X–$Y [conditions]"
+✅ CORRECT: "Range $83,870–$94,584 holds, upside capped by overhead supply"
 
-LONG-TERM VIEW:
-[Price corridor, key variable, scenario bounds] - ONE sentence.
+Long-term view:
+Start with dollar range IMMEDIATELY. Format: "$X–$Y [conditions]"
+❌ WRONG: "Corridor $70,000–$102,000"
+✅ CORRECT: "$70,000–$102,000 sensitive to policy trajectory"
 
-RISK FRAMING (2-3 SENTENCES MAX):
+Risk framing (2-3 sentences max):
 Identify specific macro catalysts with dates and implications. Only facts and market implications, no narrative language.
 
 Key events to reference:
@@ -595,7 +646,7 @@ FOMC (Dec 18) anchors near-term rates; pricing implies 25bp hold.
 CPI (Jan 15) above 3.5% challenges current rate path assumptions.
 Deposit outflows exceeding $50B weekly trigger liquidity concerns.
 
-INSTITUTIONAL REFERENCE:
+Institutional reference:
 Pick ONE random institution from this list and cite their latest public BTC price target/view (if known):
 * BlackRock
 * JPMorgan
@@ -618,25 +669,26 @@ Before output, verify:
 2. Does every sentence work on price?
 3. Can you remove 10% more words without losing meaning?
 4. Is the tone cold and factual, not narrative?
+5. ❌ Did you use "Price trades", "Corridor", or "Price range"? If YES → FIX IMMEDIATELY
 
-If YES → publish
+If YES to 1-4 and NO to 5 → publish
 If NO → compress further
 
 EXAMPLE (PERFECT):
-SHORT-TERM VIEW:
-Price trades $86,271–$88,548, break above requires sustained bid.
+Short-term view:
+$86,271–$88,548, break above requires sustained bid.
 
-MEDIUM-TERM VIEW:
+Medium-term view:
 Range $83,870–$94,584 holds, upside capped by overhead supply, breakout needs macro shift.
 
-LONG-TERM VIEW:
-Corridor $70,000–$102,000 sensitive to policy trajectory.
+Long-term view:
+$70,000–$102,000 sensitive to policy trajectory.
 
-RISK FRAMING:
+Risk framing:
 FOMC (Dec 18) anchors near-term rates; pricing implies 25bp hold.
 CPI (Jan 15) above 3.5% challenges current rate path assumptions.
 
-INSTITUTIONAL REFERENCE:
+Institutional reference:
 Goldman Sachs targets $150K-$200K by end 2025
 
 MAIN RULE:
@@ -743,7 +795,9 @@ MACRO BACKDROP:"""
         ta_monthly: Dict,
         ta_yearly: Dict,
         eth_btc_context: str,
-        macro_data: Dict
+        sp500_data: Dict,
+        macro_data: Dict,
+        correlation: Optional[float]
     ) -> str:
         """
         Генерация AI прогноза для ETH
@@ -753,7 +807,9 @@ MACRO BACKDROP:"""
             ta_monthly: Технический анализ для месячного прогноза
             ta_yearly: Технический анализ для годового прогноза
             eth_btc_context: Контекст ETH/BTC positioning
+            sp500_data: Данные S&P 500
             macro_data: Макроэкономические данные
+            correlation: Корреляция ETH-SPX
         
         Returns:
             Текст AI прогноза для ETH
@@ -769,11 +825,38 @@ Current Price: ${price:,.2f}
 Support: ${ta_weekly['support']:,.2f} | Resistance: ${ta_weekly['resistance']:,.2f}
 Trend: {ta_weekly['trend']}
 
+Medium-term levels:
+- Support zone: ${ta_monthly['support']:,.2f}
+- Resistance zone: ${ta_monthly['resistance']:,.2f}
+- Trend character: {ta_monthly['trend']}
+
+Long-term context:
+- Major trend: {ta_yearly['trend']}
+- Annual support: ${ta_yearly['support']:,.2f}
+- Annual resistance: ${ta_yearly['resistance']:,.2f}
+
 ETH-SPECIFIC CONTEXT:
 {eth_btc_context}
 
-MACRO BACKDROP:
-- Federal Funds Rate: {macro_data.get('fed_rate', 'N/A')}%"""
+MACRO BACKDROP:"""
+            
+            if sp500_data['current_price'] is not None:
+                context += f"""
+- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)
+- Risk appetite: {"positive" if sp500_data['change_1m'] > 0 else "negative"}"""
+            
+            if correlation is not None:
+                corr_strength = "strong" if abs(correlation) > 0.7 else "moderate" if abs(correlation) > 0.4 else "weak"
+                corr_direction = "positive" if correlation > 0 else "negative"
+                context += f"""
+- ETH-equity correlation: {corr_strength} {corr_direction} ({correlation:.2f})"""
+            
+            if macro_data.get('fed_rate'):
+                context += f"""
+- Federal Funds Rate: {macro_data['fed_rate']:.2f}%"""
+            else:
+                context += f"""
+- Monetary policy: data unavailable"""
 
             # Используем почти тот же system_prompt что и для BTC
             system_prompt = """ROLE:
@@ -786,9 +869,10 @@ LANGUAGE RULES (STRICT):
 * NO evaluative adjectives
 * NO emotional language
 * NO narrative language
+* ❌ FORBIDDEN PHRASES: "Price trades", "Price within", "Corridor", "Price range"
 
 ALLOWED vocabulary:
-* "trades within range", "capped above/supported below"
+* "capped above/supported below"
 * "requires break above/below"
 * "anchors", "implies", "challenges assumptions"
 
@@ -801,26 +885,43 @@ ETH-SPECIFIC FACTORS:
 
 STRUCTURE:
 
-SHORT-TERM VIEW:
-[Price range, conditions] - ONE sentence.
+Short-term view:
+Start with dollar range IMMEDIATELY. Format: "$X–$Y, [conditions]"
+❌ WRONG: "Price trades $3,180–$3,310"
+✅ CORRECT: "$3,180–$3,310, ETH/BTC ratio positioning improves"
 
-MEDIUM-TERM VIEW:
-[Price range, factors] - ONE sentence.
+Medium-term view:
+Use "Range" ONLY for medium-term. Format: "Range $X–$Y [conditions]"
+✅ CORRECT: "Range $2,950–$3,580 assumes continued institutional flows"
 
-LONG-TERM VIEW:
-[Price corridor, key variable] - ONE sentence.
+Long-term view:
+Start with dollar range IMMEDIATELY. Format: "$X–$Y [conditions]"
+❌ WRONG: "Corridor $2,400–$4,200"
+✅ CORRECT: "$2,400–$4,200 sensitive to staking yield dynamics"
 
-RISK FRAMING (2 SENTENCES MAX):
+Risk framing (2 sentences max):
 ETH-specific risks with facts and dates. Cold, factual tone only.
 
-INSTITUTIONAL REFERENCE (OPTIONAL):
-[Institution] targets $X-$Y by [timeframe]
+Institutional reference:
+Pick ONE random institution from this list and cite their latest public ETH price target (if known):
+* VanEck
+* ARK Invest
+* Grayscale
+* BlackRock
+* Fidelity
+* JPMorgan
+* Goldman Sachs
+* Standard Chartered
+* Bernstein
+
+If unknown, skip this section entirely.
 
 QUALITY FILTER:
 1. Fund morning brief quality?
 2. Every sentence on price?
 3. Can remove 10% more words?
 4. Cold and factual?
+5. ❌ Did you use "Price trades", "Corridor", or "Price range"? If YES → FIX IMMEDIATELY
 
 MAIN RULE:
 Less is more. Cold facts over narrative."""
@@ -864,7 +965,7 @@ Provide forecast in specified format."""
         """
         current_price = ta_weekly['current_price']
         
-        message = f"""<b>BITCOIN PRICE FORECAST</b>
+        message = f"""<b>Bitcoin Price Forecast</b>
 
 <b>Current:</b> ${current_price:,.0f}
 <b>Support:</b> ${ta_weekly['support']:,.0f} | <b>Resistance:</b> ${ta_weekly['resistance']:,.0f}
@@ -1067,6 +1168,10 @@ Provide forecast in specified format."""
                     eth_ta_monthly = self.calculate_technical_indicators(eth_df_1d)
                     eth_ta_yearly = self.calculate_technical_indicators(eth_df_1w)
                     
+                    # 12a. Рассчитываем корреляцию ETH-SPX
+                    logger.info("Шаг 12a: Расчет корреляции ETH-SPX")
+                    eth_correlation = self.calculate_eth_sp500_correlation(eth_df_1d)
+                    
                     # 13. Генерируем ETH прогноз
                     logger.info("Шаг 13: Генерация AI прогноза для ETH")
                     eth_forecast = self.generate_eth_forecast(
@@ -1074,19 +1179,29 @@ Provide forecast in specified format."""
                         eth_ta_monthly, 
                         eth_ta_yearly,
                         eth_reason,  # Используем reason как контекст
-                        macro_data
+                        sp500_data,  # Добавляем S&P 500 данные
+                        macro_data,
+                        eth_correlation  # Добавляем корреляцию ETH-SPX
                     )
                     
                     # 14. Форматируем и публикуем ETH прогноз
                     logger.info("Шаг 14: Публикация ETH прогноза в Telegram")
-                    eth_message = f"""<b>ETHEREUM PRICE FORECAST</b>
+                    
+                    # Реальная задержка 1 час между BTC и ETH постами
+                    logger.info("⏳ Ожидание 1 часа перед публикацией ETH...")
+                    time.sleep(3600)  # 1 час = 3600 секунд
+                    
+                    # Время публикации ETH (фактическое текущее время)
+                    eth_time = datetime.now()
+                    
+                    eth_message = f"""<b>Ethereum Price Forecast</b>
 
 <b>Current:</b> ${eth_ta_weekly['current_price']:,.0f}
 <b>Support:</b> ${eth_ta_weekly['support']:,.0f} | <b>Resistance:</b> ${eth_ta_weekly['resistance']:,.0f}
 
 {eth_forecast}
 
-<i>OracAI-assisted analysis | Not financial advice | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
+<i>OracAI-assisted analysis | Not financial advice | {eth_time.strftime('%d %b %Y %H:%M UTC')}</i>
 """
                     self.publish_to_telegram(eth_message, None)
                     logger.info("✅ ETH прогноз успешно опубликован")
