@@ -1,5 +1,5 @@
 """
-BTC Forecast Bot - MVP Version
+BTC Forecast Bot - MVP Versionn
 Автоматический технический анализ Bitcoin с AI прогнозом на неделю, месяц и год
 """
 
