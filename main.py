@@ -247,6 +247,60 @@ class BTCForecastBot:
         
         return support, resistance
     
+    def calculate_market_verdict(self, ta_data: Dict) -> str:
+        """
+        Определение вердикта рынка: Bearish/Neutral/Bullish
+        
+        Args:
+            ta_data: Технический анализ
+        
+        Returns:
+            'Bearish', 'Neutral', или 'Bullish'
+        """
+        score = 0
+        
+        # RSI анализ
+        rsi = ta_data['rsi']
+        if rsi > 60:
+            score += 1
+        elif rsi < 40:
+            score -= 1
+        
+        # MACD анализ
+        if ta_data['macd_hist'] > 0:
+            score += 1
+        else:
+            score -= 1
+        
+        # Trend анализ
+        trend = ta_data['trend']
+        if 'uptrend' in trend:
+            score += 1
+        elif 'downtrend' in trend:
+            score -= 1
+        
+        # Price vs EMA
+        price = ta_data['current_price']
+        if price > ta_data['ema20']:
+            score += 1
+        else:
+            score -= 1
+        
+        # Bollinger position
+        bb_pos = ta_data['bb_position']
+        if bb_pos > 60:
+            score += 1
+        elif bb_pos < 40:
+            score -= 1
+        
+        # Определяем verdict
+        if score >= 2:
+            return "Bullish"
+        elif score <= -2:
+            return "Bearish"
+        else:
+            return "Neutral"
+    
     def fetch_sp500_data(self) -> Dict:
         """
         Получение данных S&P 500
@@ -571,112 +625,104 @@ class BTCForecastBot:
         try:
             logger.info("Генерация AI прогноза")
             
+            # Рассчитываем market verdict
+            market_verdict = self.calculate_market_verdict(ta_weekly)
+            
             # Формируем контекст для GPT
             context = self._build_context(
                 ta_weekly, ta_monthly, ta_yearly,
                 sp500_data, macro_data, correlation
             )
             
-            # Промпт для GPT
+            # Промпт для GPT - v3.3 упрощенная версия
             system_prompt = """ROLE:
-You are a professional crypto market analyst writing for a smart Telegram channel. Your output is a Bitcoin Price Forecast that reads like a brief institutional report, not a textbook.
+You are a professional crypto market analyst writing for retail investors. Your output is a Bitcoin Price Forecast that is clear, concise, and actionable - not academic or technical.
 
 STYLE & TONE:
-* Concise, dense, confident
-* No "educational" phrasing or fluff
-* Language: analytical, alive, not academic
-* NO disclaimers in body (only in footer)
-* NO obvious statements ("market is volatile", etc.)
-* Active voice, scenario-based thinking
-* Formulations through conditions and price action
+* Simple, direct language
+* No jargon, no technical indicator names
+* Active voice, scenario-based
+* Confident but not overconfident
+* NO disclaimers in body
 
 STRUCTURE (STRICT):
 
-📍 Key levels
+Market verdict: [Bearish/Neutral/Bullish]
+
+Key levels
 Current: $X
 Support: $Y | Resistance: $Z
 
-📈 Short-term setup (1–7 days)
-Use scenario approach:
-* Base case: [most likely scenario - 1 sentence]
-* Bull case: [what needs to happen for upside - 1 sentence]  
-* Bear case: [what breaks structure - 1 sentence]
+Short-term setup (1–7 days)
+Base case: [most likely scenario - 1 sentence]
+Bull case: [upside scenario - 1 sentence]
+Bear case: [downside scenario - 1 sentence]
 
-Formulations - active, through conditions and price actions.
-Example: "Base case: $86K–$89K consolidation holds. Bull case: break above $89K on volume targets $92K. Bear case: loss of $86K support opens $82K."
+Mid-term structure (1–4 weeks)
+[2-3 sentences on range, what limits movement, key zones]
 
-📊 Mid-term structure (1–4 weeks)
-* Range [1 sentence]
-* What limits movement [1 sentence]
-* Key zone of interest [optional, if relevant]
+What matters now
+- [Specific trigger/event - when, what to watch]
+- [Market positioning or sentiment - brief]
+- [Key technical or macro factor - actionable]
 
-🌍 Macro outlook (6–12 months)
-* Wide price corridor [1 sentence]
-* Key macro driver [1 sentence]
-* NO abstract phrases
-
-⚠️ Market focus
-ONE specific near-term trigger (FOMC, CPI, ETF flows, liquidity, policy).
-How market is pricing it now. [2 sentences max]
-
-Institutional view (OPTIONAL)
-* ONE line only
-* Only if it genuinely strengthens the thesis
-* Format: "[Institution] sees [specific view/target]"
+Bottom line
+[Single actionable sentence for traders/investors]
 
 FORMATTING RULES:
-* Use 1-2 emoji per block, no more
+* NO bold text in section titles
+* NO emoji 📍 anywhere
+* Use 1 emoji per section MAX (📈 💰 ⚡ only)
 * NO hashtags
-* NO word "Context"
-* NO repetitions
-* Total volume: 10-15% shorter than standard analytical report
+* Total length: 50% shorter than institutional report
 
 LANGUAGE RULES:
-* ❌ FORBIDDEN: "Price trades", "Corridor", "Price range", "due to", "reflecting", "caused by"
-* ❌ FORBIDDEN: Technical indicator names (RSI, MACD, EMA)
-* ❌ FORBIDDEN: "strong", "weak", "significant", "bullish/bearish balance"
-* ✅ ALLOWED: "breaks above/below", "targets", "opens", "holds", "tests", "clears"
+* ❌ FORBIDDEN: RSI, MACD, EMA, technical terms
+* ❌ FORBIDDEN: "strong", "weak", "significant"
+* ✅ ALLOWED: "breaks above", "holds", "tests", "targets"
+* ✅ Use: Simple price action language
 
-QUALITY FILTER:
-1. Does this give clear understanding where market is NOW?
-2. Are scenarios actionable (Bull/Base/Bear)?
+QUALITY CHECKS:
+1. Can a non-trader understand this?
+2. Are scenarios clear (Bull/Base/Bear)?
 3. Is trigger specific and dated?
-4. Can remove 10% more words?
-5. Zero fluff?
-
-If NO to any → compress further.
+4. Is bottom line actionable?
+5. 50% shorter than v3.2?
 
 EXAMPLE (PERFECT):
 
-📍 Key levels
+Market verdict: Neutral
+
+Key levels
 Current: $87,920
 Support: $86,700 | Resistance: $89,480
 
 📈 Short-term setup (1–7 days)
-Base case: $86.7K–$89.5K range persists absent catalyst.
-Bull case: break above $89.5K on ETF inflows targets $92K zone.
-Bear case: loss of $86.7K opens path to $83.8K retest.
+Base case: $86.7K–$89.5K range holds without catalyst.
+Bull case: break above $89.5K targets $92K.
+Bear case: loss of $86.7K opens path to $83.8K.
 
-📊 Mid-term structure (1–4 weeks)
-$83.8K–$94.6K defines operational range. Upside capped by profit-taking overhead $90K+. Watch $88K for directional confirmation.
+💰 Mid-term structure (1–4 weeks)
+$83.8K–$94.6K range stays valid. Upside capped by profit-taking near $90K. Watch $88K for direction.
 
-🌍 Macro outlook (6–12 months)
-$70K–$125K corridor stays valid under current policy framework. Fed trajectory determines upper bound.
+⚡ What matters now
+- FOMC Dec 18: market pricing 85% hold, any hawkish shift reprices support lower
+- Profit-taking overhead $90K+ limits upside until catalyst emerges
+- ETF flows critical: sustained $500M+ weekly needed for breakout
 
-⚠️ Market focus
-FOMC Dec 18 anchors near-term. Market pricing 85% hold at 4.5%, any hawkish shift reprices support lower.
-
-Institutional view
-JPMorgan sees $150K possible if ETF flows sustain $500M+ weekly.
+Bottom line
+Range-bound until FOMC; wait for clear break of $86.7K or $89.5K before positioning.
 
 MAIN RULE:
-Give reader clear understanding of: where market is, what scenarios are possible, what needs to happen for price to move either direction."""
+Clear, simple, actionable. No fluff, no jargon, 50% shorter."""
 
-            user_prompt = f"""Analyze the following data and provide Bitcoin price forecast:
+            user_prompt = f"""Market verdict: {market_verdict}
+
+Analyze data and provide Bitcoin forecast:
 
 {context}
 
-Provide forecast in the specified format."""
+Follow the exact format specified."""
 
             # Запрос к GPT
             response = self.openai_client.chat.completions.create(
@@ -686,7 +732,7 @@ Provide forecast in the specified format."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=1000
+                max_tokens=800
             )
             
             forecast = response.choices[0].message.content
@@ -795,6 +841,9 @@ MACRO BACKDROP:"""
         try:
             logger.info("Генерация AI прогноза для ETH")
             
+            # Рассчитываем market verdict для ETH
+            market_verdict = self.calculate_market_verdict(ta_weekly)
+            
             price = ta_weekly['current_price']
             
             context = f"""MARKET DATA - ETH/USD
@@ -836,84 +885,75 @@ MACRO BACKDROP:"""
                 context += f"""
 - Monetary policy: data unavailable"""
 
-            # Используем тот же формат что и для BTC
+            # v3.3 упрощенный промпт для ETH
             system_prompt = """ROLE:
-You are a professional crypto market analyst writing for a smart Telegram channel. Your output is an Ethereum Price Forecast that reads like a brief institutional report, not a textbook.
+You are a professional crypto market analyst writing for retail investors. Your output is an Ethereum Price Forecast that is clear, concise, and actionable.
 
 STYLE & TONE:
-* Concise, dense, confident
-* No "educational" phrasing or fluff
-* Language: analytical, alive, not academic
-* NO disclaimers in body (only in footer)
-* NO obvious statements
-* Active voice, scenario-based thinking
+* Simple, direct language
+* No jargon, no technical terms
+* Active voice, scenario-based
+* Confident but not overconfident
+* NO disclaimers in body
 
-ETH-SPECIFIC FACTORS TO CONSIDER:
-* ETH/BTC positioning and ratio dynamics
-* ETF flows and institutional allocation
-* Staking yield and supply dynamics
-* Layer 2 ecosystem value capture
-* Regulatory status (commodity vs security)
+ETH-SPECIFIC FACTORS:
+* ETH/BTC ratio dynamics
+* ETF flows
+* Layer 2 ecosystem
+* Staking dynamics
 
 STRUCTURE (STRICT):
 
-📍 Key levels
+Market verdict: [Bearish/Neutral/Bullish]
+
+Key levels
 Current: $X
 Support: $Y | Resistance: $Z
 
-📈 Short-term setup (1–7 days)
-Use scenario approach:
-* Base case: [most likely scenario - 1 sentence]
-* Bull case: [what needs to happen for upside - 1 sentence]  
-* Bear case: [what breaks structure - 1 sentence]
+Short-term setup (1–7 days)
+Base case: [most likely scenario - 1 sentence]
+Bull case: [upside scenario - 1 sentence]
+Bear case: [downside scenario - 1 sentence]
 
-Example: "Base case: $3.2K–$3.5K range holds. Bull case: ETH/BTC strength above 0.039 targets $3.7K. Bear case: break below $3.2K tests $2.9K support."
+Mid-term structure (1–4 weeks)
+[2-3 sentences on range, ETH-specific dynamics]
 
-📊 Mid-term structure (1–4 weeks)
-* Range [1 sentence]
-* What limits movement [1 sentence]
-* ETH-specific dynamic (ETF flows, staking, L2) [optional]
+What matters now
+- [Specific ETH trigger - when, what to watch]
+- [ETH positioning or flows - brief]
+- [Key factor for ETH - actionable]
 
-🌍 Macro outlook (6–12 months)
-* Wide price corridor [1 sentence]
-* Key driver (regulatory clarity, staking dynamics, institutional flows) [1 sentence]
-
-⚠️ Market focus
-ONE specific near-term trigger relevant to ETH.
-How market is pricing it. [2 sentences max]
-
-Institutional view (OPTIONAL)
-* ONE line only
-* Only if strengthens thesis
-* Format: "[Institution] sees [specific view/target]"
+Bottom line
+[Single actionable sentence for traders/investors]
 
 FORMATTING RULES:
-* Use 1-2 emoji per block, no more
+* NO bold text in section titles
+* NO emoji anywhere
+* Use 1 emoji per section MAX (📈 💰 ⚡)
 * NO hashtags
-* NO word "Context"
-* NO repetitions
-* Total volume: 10-15% shorter than standard report
+* 50% shorter than institutional report
 
 LANGUAGE RULES:
-* ❌ FORBIDDEN: "Price trades", "Corridor", "due to", "reflecting"
-* ❌ FORBIDDEN: Technical indicators, "strong", "weak", "significant"
-* ✅ ALLOWED: "breaks above/below", "targets", "opens", "holds", "tests"
+* ❌ FORBIDDEN: Technical indicators, jargon
+* ✅ ALLOWED: Simple price action language
 
-QUALITY FILTER:
-1. Clear where ETH is NOW?
+QUALITY CHECKS:
+1. Clear for non-traders?
 2. Scenarios actionable?
 3. Trigger specific?
-4. Can remove 10% more words?
-5. Zero fluff?
+4. Bottom line clear?
+5. 50% shorter?
 
 MAIN RULE:
-Give reader clear understanding of: where ETH is, what scenarios possible, what needs to happen for price to move either direction."""
+Clear, simple, actionable. No fluff, no jargon."""
 
-            user_prompt = f"""Analyze ETHEREUM data and provide price forecast:
+            user_prompt = f"""Market verdict: {market_verdict}
+
+Analyze ETHEREUM data and provide forecast:
 
 {context}
 
-Provide forecast in specified format."""
+Follow exact format."""
 
             # Запрос к GPT
             response = self.openai_client.chat.completions.create(
@@ -923,7 +963,7 @@ Provide forecast in specified format."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=800
+                max_tokens=700
             )
             
             forecast = response.choices[0].message.content.strip()
