@@ -247,56 +247,153 @@ class BTCForecastBot:
         
         return support, resistance
     
-    def calculate_market_verdict(self, ta_data: Dict) -> str:
+    def calculate_market_regime(self, ta_data: Dict) -> Dict:
         """
-        Определение вердикта рынка: Bearish/Neutral/Bullish
+        Определение рыночного режима: BULL/BEAR/TRANSITION
+        
+        Новая философия: не прогноз цены, а оценка режима и риска.
         
         Args:
             ta_data: Технический анализ
         
         Returns:
-            'Bearish', 'Neutral', или 'Bullish'
+            Dict с regime, confidence, tail_risk, bias
         """
-        score = 0
+        # === REGIME SCORING ===
+        regime_score = 0
+        confidence_factors = []
         
-        # RSI анализ
-        rsi = ta_data['rsi']
-        if rsi > 60:
-            score += 1
-        elif rsi < 40:
-            score -= 1
-        
-        # MACD анализ
-        if ta_data['macd_hist'] > 0:
-            score += 1
-        else:
-            score -= 1
-        
-        # Trend анализ
+        # 1. Trend structure (weight: 2)
         trend = ta_data['trend']
-        if 'uptrend' in trend:
-            score += 1
-        elif 'downtrend' in trend:
-            score -= 1
-        
-        # Price vs EMA
         price = ta_data['current_price']
-        if price > ta_data['ema20']:
-            score += 1
+        
+        if 'uptrend' in trend.lower():
+            regime_score += 2
+            confidence_factors.append(('trend_aligned', True))
+        elif 'downtrend' in trend.lower():
+            regime_score -= 2
+            confidence_factors.append(('trend_aligned', True))
         else:
-            score -= 1
+            confidence_factors.append(('trend_aligned', False))
         
-        # Bollinger position
+        # 2. Price vs EMAs (weight: 1 each)
+        above_ema20 = price > ta_data['ema20']
+        above_ema50 = price > ta_data['ema50']
+        above_ema200 = price > ta_data['ema200']
+        
+        ema_score = sum([above_ema20, above_ema50, above_ema200])
+        if ema_score >= 2:
+            regime_score += 1
+        elif ema_score <= 1:
+            regime_score -= 1
+        
+        # 3. Momentum (RSI context)
+        rsi = ta_data['rsi']
+        if rsi > 65:
+            regime_score += 1
+            confidence_factors.append(('momentum_strong', True))
+        elif rsi < 35:
+            regime_score -= 1
+            confidence_factors.append(('momentum_weak', True))
+        else:
+            confidence_factors.append(('momentum_neutral', True))
+        
+        # 4. MACD trend
+        if ta_data['macd_hist'] > 0:
+            regime_score += 1
+        else:
+            regime_score -= 1
+        
+        # === DETERMINE REGIME ===
+        if regime_score >= 3:
+            regime = "BULL"
+        elif regime_score <= -3:
+            regime = "BEAR"
+        elif regime_score >= 1:
+            regime = "BULL (early)"
+        elif regime_score <= -1:
+            regime = "BEAR (early)"
+        else:
+            regime = "TRANSITION"
+        
+        # === CONFIDENCE CALCULATION ===
+        # Base confidence from regime strength
+        base_confidence = min(abs(regime_score) * 15, 60)
+        
+        # Adjust for trend alignment
+        trend_aligned = any(f[0] == 'trend_aligned' and f[1] for f in confidence_factors)
+        if trend_aligned:
+            base_confidence += 15
+        
+        # Adjust for momentum clarity
+        momentum_clear = rsi > 60 or rsi < 40
+        if momentum_clear:
+            base_confidence += 10
+        
+        # Cap confidence
+        confidence = min(base_confidence, 85)
+        
+        # === TAIL RISK ASSESSMENT ===
+        tail_risk = "INACTIVE"
+        tail_direction = None
+        
+        # Check for overextension (potential reversal risk)
         bb_pos = ta_data['bb_position']
-        if bb_pos > 60:
-            score += 1
-        elif bb_pos < 40:
-            score -= 1
         
-        # Определяем verdict
-        if score >= 2:
+        if regime in ["BULL", "BULL (early)"]:
+            # In bull regime, tail risk is to downside
+            if rsi > 75 or bb_pos > 90:
+                tail_risk = "ACTIVE"
+                tail_direction = "↓"
+                confidence = max(confidence - 20, 15)  # Reduce confidence
+            elif rsi > 70 or bb_pos > 80:
+                tail_risk = "ELEVATED"
+                tail_direction = "↓"
+                confidence = max(confidence - 10, 20)
+        
+        elif regime in ["BEAR", "BEAR (early)"]:
+            # In bear regime, tail risk is further downside
+            if rsi < 25 or bb_pos < 10:
+                tail_risk = "ACTIVE"
+                tail_direction = "↓"
+            elif rsi < 30 or bb_pos < 20:
+                tail_risk = "ELEVATED"
+                tail_direction = "↓"
+        
+        # === DIRECTIONAL BIAS ===
+        if regime in ["BULL", "BULL (early)"]:
+            if tail_risk == "ACTIVE":
+                bias = "Upside limited, reversal risk elevated"
+            else:
+                bias = "Directional upside favored"
+        elif regime in ["BEAR", "BEAR (early)"]:
+            if tail_risk == "ACTIVE":
+                bias = "Downside risk asymmetric, capitulation possible"
+            else:
+                bias = "Directional downside pressure"
+        else:
+            bias = "No clear directional edge"
+        
+        return {
+            'regime': regime,
+            'confidence': confidence,
+            'tail_risk': tail_risk,
+            'tail_direction': tail_direction,
+            'bias': bias,
+            'regime_score': regime_score
+        }
+    
+    def calculate_market_verdict(self, ta_data: Dict) -> str:
+        """
+        Legacy wrapper для совместимости.
+        Использует новую систему regime, но возвращает старый формат.
+        """
+        regime_data = self.calculate_market_regime(ta_data)
+        regime = regime_data['regime']
+        
+        if 'BULL' in regime:
             return "Bullish"
-        elif score <= -2:
+        elif 'BEAR' in regime:
             return "Bearish"
         else:
             return "Neutral"
@@ -625,104 +722,93 @@ class BTCForecastBot:
         try:
             logger.info("Генерация AI прогноза")
             
-            # Рассчитываем market verdict
-            market_verdict = self.calculate_market_verdict(ta_weekly)
-            
             # Формируем контекст для GPT
             context = self._build_context(
                 ta_weekly, ta_monthly, ta_yearly,
                 sp500_data, macro_data, correlation
             )
             
-            # Промпт для GPT - v3.3 упрощенная версия
+            # Промпт для GPT - v4.0 REGIME-BASED формат
             system_prompt = """ROLE:
-You are a professional crypto market analyst writing for retail investors. Your output is a Bitcoin Price Forecast that is clear, concise, and actionable - not academic or technical.
+You are a risk-focused crypto market analyst. You provide REGIME ASSESSMENT, not price predictions.
 
-STYLE & TONE:
-* Simple, direct language
-* No jargon, no technical indicator names
-* Active voice, scenario-based
-* Confident but not overconfident
-* NO disclaimers in body
+CORE PHILOSOPHY:
+❌ NOT: "What if price goes up/down?"
+✅ YES: "What is the current market state and what actions are appropriate?"
 
-STRUCTURE (STRICT):
+This is regime-based analysis, not price forecasting.
+Levels are references, NOT trade triggers.
+Regime overrides price patterns.
 
-Market verdict: [Bearish/Neutral/Bullish]
+STRUCTURE (STRICT - follow exactly):
 
-Key levels
-Current: $X
-Support: $Y | Resistance: $Z
+Market regime: [BULL/BEAR/TRANSITION] [(early) if applicable]
+Confidence: [LOW/MODERATE/HIGH] ([X]%)
+Tail risk: [INACTIVE/ELEVATED/ACTIVE] [↑/↓ if active]
 
-Short-term setup (1–7 days)
-Base case: [most likely scenario - 1 sentence]
-Bull case: [upside scenario - 1 sentence]
-Bear case: [downside scenario - 1 sentence]
+Bias:
+• [Primary directional statement]
+• [Risk asymmetry statement]
 
-Mid-term structure (1–4 weeks)
-[2-3 sentences on range, what limits movement, key zones]
+Key implication:
+[One sentence: What does this regime MEAN for positioning? Is this a breakout environment or not?]
 
-What matters now
-- [Specific trigger/event - when, what to watch]
-- [Market positioning or sentiment - brief]
-- [Key technical or macro factor - actionable]
+Directional policy:
+• Longs: [encouraged/neutral/discouraged]
+• Shorts: [encouraged/tactical only/discouraged]
+• Position size: [normal/reduced/capped]
 
-Bottom line
-[Single actionable sentence for traders/investors]
+Reference zones (not signals):
+• $[X] — [what happens if breached, e.g. "invalidation of bearish bias"]
+• $[Y] — [what happens if breached, e.g. "acceleration risk zone"]
+
+What would change the view:
+• [Condition 1 that would shift regime]
+• [Condition 2]
 
 FORMATTING RULES:
-* NO bold text in section titles
-* NO emoji 📍 anywhere
-* Use 1 emoji per section MAX (📈 💰 ⚡ only)
+* NO bold text anywhere
+* NO "Bull case / Bear case" framing
+* NO "consider long/short" language
+* NO price targets or predictions
+* NO emojis except these: ⚡
 * NO hashtags
-* Total length: 50% shorter than institutional report
+* Zones are REFERENCES not SIGNALS
+* Keep it under 200 words
 
 LANGUAGE RULES:
-* ❌ FORBIDDEN: RSI, MACD, EMA, technical terms
-* ❌ FORBIDDEN: "strong", "weak", "significant"
-* ✅ ALLOWED: "breaks above", "holds", "tests", "targets"
-* ✅ Use: Simple price action language
+❌ FORBIDDEN: "support", "resistance" as action triggers
+❌ FORBIDDEN: "targets $X", "could reach", "expect"
+❌ FORBIDDEN: Technical indicator names (RSI, MACD, EMA)
+❌ FORBIDDEN: "significant", "strong", "weak"
+✅ ALLOWED: "regime", "bias", "policy", "risk", "zone", "invalidation"
+✅ ALLOWED: "if breached", "would shift", "implies"
 
 QUALITY CHECKS:
-1. Can a non-trader understand this?
-2. Are scenarios clear (Bull/Base/Bear)?
-3. Is trigger specific and dated?
-4. Is bottom line actionable?
-5. 50% shorter than v3.2?
+1. Is this about REGIME, not price prediction?
+2. Are zones framed as references, not signals?
+3. Is there a clear POLICY (what to do), not just forecast?
+4. Would this make sense if price does the OPPOSITE?
+5. Under 200 words?
 
-EXAMPLE (PERFECT):
+CRITICAL:
+Never say "if Bitcoin breaks above X, target is Y" — this is old paradigm.
+Instead say "X is invalidation zone for current bearish bias" — this is regime thinking."""
 
-Market verdict: Neutral
+            # Получаем данные режима
+            regime_data = self.calculate_market_regime(ta_weekly)
+            
+            user_prompt = f"""Current regime analysis:
+- Regime: {regime_data['regime']}
+- Confidence: {regime_data['confidence']}%
+- Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
+- Bias: {regime_data['bias']}
 
-Key levels
-Current: $87,920
-Support: $86,700 | Resistance: $89,480
-
-📈 Short-term setup (1–7 days)
-Base case: $86.7K–$89.5K range holds without catalyst.
-Bull case: break above $89.5K targets $92K.
-Bear case: loss of $86.7K opens path to $83.8K.
-
-💰 Mid-term structure (1–4 weeks)
-$83.8K–$94.6K range stays valid. Upside capped by profit-taking near $90K. Watch $88K for direction.
-
-⚡ What matters now
-- FOMC Dec 18: market pricing 85% hold, any hawkish shift reprices support lower
-- Profit-taking overhead $90K+ limits upside until catalyst emerges
-- ETF flows critical: sustained $500M+ weekly needed for breakout
-
-Bottom line
-Range-bound until FOMC; wait for clear break of $86.7K or $89.5K before positioning.
-
-MAIN RULE:
-Clear, simple, actionable. No fluff, no jargon, 50% shorter."""
-
-            user_prompt = f"""Market verdict: {market_verdict}
-
-Analyze data and provide Bitcoin forecast:
-
+Market data:
 {context}
 
-Follow the exact format specified."""
+Generate regime-based market bulletin following the EXACT structure specified.
+Remember: This is NOT a price forecast. This is a regime assessment with policy implications."""
 
             # Запрос к GPT
             response = self.openai_client.chat.completions.create(
@@ -824,7 +910,7 @@ MACRO BACKDROP:"""
         correlation: Optional[float]
     ) -> str:
         """
-        Генерация AI прогноза для ETH
+        Генерация AI прогноза для ETH (regime-based)
         
         Args:
             ta_weekly: Технический анализ для недельного прогноза
@@ -841,26 +927,26 @@ MACRO BACKDROP:"""
         try:
             logger.info("Генерация AI прогноза для ETH")
             
-            # Рассчитываем market verdict для ETH
-            market_verdict = self.calculate_market_verdict(ta_weekly)
+            # Рассчитываем regime для ETH
+            regime_data = self.calculate_market_regime(ta_weekly)
             
             price = ta_weekly['current_price']
             
             context = f"""MARKET DATA - ETH/USD
 
 Current Price: ${price:,.2f}
-Support: ${ta_weekly['support']:,.2f} | Resistance: ${ta_weekly['resistance']:,.2f}
+Reference zones: ${ta_weekly['support']:,.2f} | ${ta_weekly['resistance']:,.2f}
 Trend: {ta_weekly['trend']}
 
 Medium-term levels:
-- Support zone: ${ta_monthly['support']:,.2f}
-- Resistance zone: ${ta_monthly['resistance']:,.2f}
+- Lower zone: ${ta_monthly['support']:,.2f}
+- Upper zone: ${ta_monthly['resistance']:,.2f}
 - Trend character: {ta_monthly['trend']}
 
 Long-term context:
 - Major trend: {ta_yearly['trend']}
-- Annual support: ${ta_yearly['support']:,.2f}
-- Annual resistance: ${ta_yearly['resistance']:,.2f}
+- Annual lower: ${ta_yearly['support']:,.2f}
+- Annual upper: ${ta_yearly['resistance']:,.2f}
 
 ETH-SPECIFIC CONTEXT:
 {eth_btc_context}
@@ -885,75 +971,73 @@ MACRO BACKDROP:"""
                 context += f"""
 - Monetary policy: data unavailable"""
 
-            # v3.3 упрощенный промпт для ETH
+            # v4.0 REGIME-BASED промпт для ETH
             system_prompt = """ROLE:
-You are a professional crypto market analyst writing for retail investors. Your output is an Ethereum Price Forecast that is clear, concise, and actionable.
+You are a risk-focused crypto market analyst. You provide REGIME ASSESSMENT for Ethereum, not price predictions.
 
-STYLE & TONE:
-* Simple, direct language
-* No jargon, no technical terms
-* Active voice, scenario-based
-* Confident but not overconfident
-* NO disclaimers in body
+CORE PHILOSOPHY:
+❌ NOT: "What if ETH price goes up/down?"
+✅ YES: "What is ETH's current market state and what actions are appropriate?"
 
-ETH-SPECIFIC FACTORS:
-* ETH/BTC ratio dynamics
-* ETF flows
-* Layer 2 ecosystem
-* Staking dynamics
+ETH-SPECIFIC FACTORS TO CONSIDER:
+* ETH/BTC ratio dynamics (is ETH leading or lagging?)
+* Staking yield environment
+* Layer 2 activity
+* ETF flow context
 
-STRUCTURE (STRICT):
+STRUCTURE (STRICT - follow exactly):
 
-Market verdict: [Bearish/Neutral/Bullish]
+Market regime: [BULL/BEAR/TRANSITION] [(early) if applicable]
+Confidence: [LOW/MODERATE/HIGH] ([X]%)
+Tail risk: [INACTIVE/ELEVATED/ACTIVE] [↑/↓ if active]
 
-Key levels
-Current: $X
-Support: $Y | Resistance: $Z
+Bias:
+• [Primary directional statement]
+• [ETH vs BTC relative statement]
 
-Short-term setup (1–7 days)
-Base case: [most likely scenario - 1 sentence]
-Bull case: [upside scenario - 1 sentence]
-Bear case: [downside scenario - 1 sentence]
+Key implication:
+[One sentence: What does this regime MEAN for ETH positioning?]
 
-Mid-term structure (1–4 weeks)
-[2-3 sentences on range, ETH-specific dynamics]
+Directional policy:
+• Longs: [encouraged/neutral/discouraged]
+• Shorts: [encouraged/tactical only/discouraged]
+• ETH/BTC ratio: [favor ETH/neutral/favor BTC]
 
-What matters now
-- [Specific ETH trigger - when, what to watch]
-- [ETH positioning or flows - brief]
-- [Key factor for ETH - actionable]
+Reference zones (not signals):
+• $[X] — [what happens if breached]
+• $[Y] — [what happens if breached]
 
-Bottom line
-[Single actionable sentence for traders/investors]
+What would change the view:
+• [Condition 1]
+• [Condition 2]
 
 FORMATTING RULES:
-* NO bold text in section titles
-* NO emoji anywhere
-* Use 1 emoji per section MAX (📈 💰 ⚡)
+* NO bold text anywhere
+* NO "Bull case / Bear case" framing
+* NO price targets or predictions
+* NO emojis except: ⚡
 * NO hashtags
-* 50% shorter than institutional report
+* Keep it under 180 words
 
 LANGUAGE RULES:
-* ❌ FORBIDDEN: Technical indicators, jargon
-* ✅ ALLOWED: Simple price action language
+❌ FORBIDDEN: "support", "resistance" as triggers
+❌ FORBIDDEN: "targets $X", "could reach"
+❌ FORBIDDEN: Technical indicator names
+✅ ALLOWED: "regime", "bias", "policy", "invalidation"
 
-QUALITY CHECKS:
-1. Clear for non-traders?
-2. Scenarios actionable?
-3. Trigger specific?
-4. Bottom line clear?
-5. 50% shorter?
+CRITICAL:
+This is regime assessment, not price forecasting."""
 
-MAIN RULE:
-Clear, simple, actionable. No fluff, no jargon."""
+            user_prompt = f"""Current ETH regime analysis:
+- Regime: {regime_data['regime']}
+- Confidence: {regime_data['confidence']}%
+- Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
+- Bias: {regime_data['bias']}
 
-            user_prompt = f"""Market verdict: {market_verdict}
-
-Analyze ETHEREUM data and provide forecast:
-
+Market data:
 {context}
 
-Follow exact format."""
+Generate regime-based ETH bulletin following the EXACT structure specified."""
 
             # Запрос к GPT
             response = self.openai_client.chat.completions.create(
@@ -981,16 +1065,20 @@ Follow exact format."""
         
         Args:
             ta_weekly: Технический анализ для текущих данных
-            forecast: AI прогноз (уже включает Key levels)
+            forecast: AI прогноз (regime-based bulletin)
         
         Returns:
             Отформатированное сообщение
         """
-        message = f"""<b>BITCOIN PRICE FORECAST</b>
+        price = ta_weekly['current_price']
+        
+        message = f"""<b>BITCOIN · MARKET STATE UPDATE</b>
+
+BTC ${price:,.0f}
 
 {forecast}
 
-<i>OracAI analysis | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
+<i>OracAI · Regime Analysis | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
 """
         
         return message
@@ -1211,12 +1299,15 @@ Follow exact format."""
                     
                     # Время публикации ETH (фактическое текущее время)
                     eth_time = datetime.now()
+                    eth_price = eth_ta_weekly['current_price']
                     
-                    eth_message = f"""<b>ETHEREUM PRICE FORECAST</b>
+                    eth_message = f"""<b>ETHEREUM · MARKET STATE UPDATE</b>
+
+ETH ${eth_price:,.0f}
 
 {eth_forecast}
 
-<i>OracAI analysis | {eth_time.strftime('%d %b %Y %H:%M UTC')}</i>
+<i>OracAI · Regime Analysis | {eth_time.strftime('%d %b %Y %H:%M UTC')}</i>
 """
                     self.publish_to_telegram(eth_message, None)
                     logger.info("✅ ETH прогноз успешно опубликован")
