@@ -1,17 +1,13 @@
-name: BTC + ETH Forecast Bot
+name: OracAI Radar
 
 on:
-  # Запуск по расписанию (каждый день в 14:00 UTC)
   schedule:
-    - cron: '0 14 * * *'  # Ежедневно 14:00 UTC (13:00-15:00 window)
-  
-  # Возможность запуска вручную
+    - cron: '0 * * * *'  # Каждый час
   workflow_dispatch:
 
 jobs:
-  forecast:
+  radar-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # Safety: 1h delay + data processing time
     
     steps:
       - name: Checkout code
@@ -28,19 +24,19 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run BTC + ETH Forecast Bot
+      - name: Run OracAI Radar
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           python main.py
       
-      - name: Report Success
-        if: success()
-        run: echo "✅ BTC Forecast успешно опубликован (+ ETH если условия выполнены)"
-      
-      - name: Report Failure
-        if: failure()
-        run: echo "❌ Ошибка при публикации Forecast"
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add state.json || true
+          git diff --quiet --cached || git commit -m "Update state"
+          git push || true
