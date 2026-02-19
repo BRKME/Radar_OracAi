@@ -1,15 +1,15 @@
 """
-BTC Forecast Bot - MVP Version
-Автоматический технический анализ Bitcoin с AI прогнозом на неделю, месяц и год
+OracAI Radar Bot - Unified Version
+Адаптивная публикация по триггерам + AI анализ режима
 """
 
 import os
 import sys
+import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 import logging
-# import tempfile  # Not needed - TradingView scraping disabled for compliance
 
 import ccxt
 import yfinance as yf
@@ -17,1029 +17,412 @@ import pandas as pd
 import ta
 import numpy as np
 from openai import OpenAI
-from fredapi import Fred
 import requests
 from dotenv import load_dotenv
-# from playwright.sync_api import sync_playwright  # Not needed - TradingView scraping disabled
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+STATE_FILE = 'state.json'
 
-class BTCForecastBot:
-    """Бот для технического анализа BTC и AI прогнозирования"""
+
+class OracAIRadar:
+    """Unified Radar Bot с триггерной логикой и AI анализом"""
     
     def __init__(self):
-        """Инициализация бота с загрузкой конфигурации"""
         load_dotenv()
         
-        # Telegram
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
-        
-        # OpenAI
         self.openai_api_key = os.getenv('OPENAI_API_KEY')
         
-        # FRED API
-        self.fred_api_key = os.getenv('FRED_API_KEY')
-        
-        # Проверка обязательных переменных
         self._validate_config()
         
-        # Инициализация клиентов
         self.exchange = ccxt.kraken()
         self.openai_client = OpenAI(api_key=self.openai_api_key)
-        
-        if self.fred_api_key:
-            self.fred = Fred(api_key=self.fred_api_key)
-        else:
-            self.fred = None
-            logger.warning("FRED API key не указан, макроэкономические данные будут ограничены")
+        self.state = self._load_state()
     
     def _validate_config(self):
-        """Проверка наличия обязательных переменных окружения"""
-        required_vars = {
+        required = {
             'TELEGRAM_BOT_TOKEN': self.telegram_token,
             'TELEGRAM_CHANNEL_ID': self.channel_id,
             'OPENAI_API_KEY': self.openai_api_key
         }
-        
-        missing_vars = [var for var, value in required_vars.items() if not value]
-        
-        if missing_vars:
-            logger.error(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            logger.error(f"Missing: {', '.join(missing)}")
             sys.exit(1)
     
-    def fetch_btc_data(self, timeframe: str, limit: int) -> pd.DataFrame:
-        """
-        Получение исторических данных BTC
-        
-        Args:
-            timeframe: Таймфрейм (1h, 4h, 1d, 1w)
-            limit: Количество свечей
-        
-        Returns:
-            DataFrame с OHLCV данными
-        """
+    def _load_state(self) -> Dict:
         try:
-            logger.info(f"Получение данных BTC/{timeframe} (limit={limit})")
-            
-            ohlcv = self.exchange.fetch_ohlcv('BTC/USD', timeframe, limit=limit)
-            
-            df = pd.DataFrame(
-                ohlcv, 
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            
-            logger.info(f"Получено {len(df)} свечей для {timeframe}")
-            return df
-            
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, 'r') as f:
+                    return json.load(f)
         except Exception as e:
-            logger.error(f"Ошибка получения данных BTC: {e}")
-            raise
+            logger.warning(f"State load error: {e}")
+        return {
+            'last_regime': None,
+            'last_publish': None,
+            'last_round_level': None,
+            'last_round_publish': None
+        }
     
-    def calculate_technical_indicators(self, df: pd.DataFrame) -> Dict:
-        """
-        Расчет технических индикаторов
-        
-        Args:
-            df: DataFrame с ценовыми данными
-        
-        Returns:
-            Словарь с рассчитанными индикаторами
-        """
+    def _save_state(self):
+        with open(STATE_FILE, 'w') as f:
+            json.dump(self.state, f, indent=2)
+    
+    # ═══════════════════════════════════════════════════════════
+    # DATA FETCHING
+    # ═══════════════════════════════════════════════════════════
+    
+    def fetch_market_data(self) -> Dict:
+        """Получение всех рыночных данных"""
         try:
-            # RSI
-            rsi_indicator = ta.momentum.RSIIndicator(close=df['close'], window=14)
-            df['rsi'] = rsi_indicator.rsi()
-            rsi = df['rsi'].iloc[-1]
-            if pd.isna(rsi):
-                logger.warning("RSI is NaN, using neutral value 50")
-                rsi = 50.0
+            btc_ticker = self.exchange.fetch_ticker('BTC/USD')
+            eth_ticker = self.exchange.fetch_ticker('ETH/USD')
             
-            # MACD
-            macd_indicator = ta.trend.MACD(close=df['close'], window_slow=26, window_fast=12, window_sign=9)
-            df['macd'] = macd_indicator.macd()
-            df['macd_signal'] = macd_indicator.macd_signal()
-            df['macd_hist'] = macd_indicator.macd_diff()
-            macd = df['macd'].iloc[-1]
-            macd_signal = df['macd_signal'].iloc[-1]
-            macd_hist = df['macd_hist'].iloc[-1]
+            btc_ohlcv_1h = self.exchange.fetch_ohlcv('BTC/USD', '1h', limit=168)
+            btc_ohlcv_1d = self.exchange.fetch_ohlcv('BTC/USD', '1d', limit=90)
             
-            # Заменяем NaN на 0 для MACD
-            if pd.isna(macd):
-                macd = 0.0
-            if pd.isna(macd_signal):
-                macd_signal = 0.0
-            if pd.isna(macd_hist):
-                macd_hist = 0.0
+            eth_ohlcv_1h = self.exchange.fetch_ohlcv('ETH/USD', '1h', limit=48)
             
-            # EMA
-            ema20_indicator = ta.trend.EMAIndicator(close=df['close'], window=20)
-            ema50_indicator = ta.trend.EMAIndicator(close=df['close'], window=50)
-            ema200_indicator = ta.trend.EMAIndicator(close=df['close'], window=200)
-            df['ema20'] = ema20_indicator.ema_indicator()
-            df['ema50'] = ema50_indicator.ema_indicator()
-            df['ema200'] = ema200_indicator.ema_indicator()
-            ema20 = df['ema20'].iloc[-1]
-            ema50 = df['ema50'].iloc[-1]
-            ema200 = df['ema200'].iloc[-1]
+            btc_df_1h = pd.DataFrame(btc_ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            btc_df_1d = pd.DataFrame(btc_ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            eth_df_1h = pd.DataFrame(eth_ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # Fallback для EMA если NaN
-            current_price = df['close'].iloc[-1]
-            if pd.isna(ema20):
-                logger.warning("EMA20 is NaN, using current price")
-                ema20 = current_price
-            if pd.isna(ema50):
-                logger.warning("EMA50 is NaN, using EMA20 or current price")
-                ema50 = ema20 if not pd.isna(ema20) else current_price
-            if pd.isna(ema200):
-                logger.warning("EMA200 is NaN, using EMA50 or current price")
-                ema200 = ema50 if not pd.isna(ema50) else current_price
+            btc_price = btc_ticker.get('last', btc_ticker.get('close', 0))
+            eth_price = eth_ticker.get('last', eth_ticker.get('close', 0))
             
-            # Bollinger Bands
-            bb_indicator = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
-            df['bb_upper'] = bb_indicator.bollinger_hband()
-            df['bb_middle'] = bb_indicator.bollinger_mavg()
-            df['bb_lower'] = bb_indicator.bollinger_lband()
-            bb_upper = df['bb_upper'].iloc[-1]
-            bb_middle = df['bb_middle'].iloc[-1]
-            bb_lower = df['bb_lower'].iloc[-1]
+            btc_7d_ago = float(btc_df_1d['close'].iloc[-7]) if len(btc_df_1d) >= 7 else btc_price
+            btc_change_7d = ((btc_price / btc_7d_ago) - 1) * 100
             
-            # Fallback для BB если NaN
-            if pd.isna(bb_upper) or pd.isna(bb_middle) or pd.isna(bb_lower):
-                logger.warning("Bollinger Bands contain NaN, using price-based defaults")
-                bb_middle = current_price
-                bb_upper = current_price * 1.02  # +2%
-                bb_lower = current_price * 0.98  # -2%
-            
-            # Позиция цены в BB (с защитой от деления на ноль)
-            if bb_upper != bb_lower:
-                bb_position = ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100
-            else:
-                bb_position = 50.0  # Нейтральная позиция при отсутствии волатильности
-                logger.warning("BB bands are equal, using neutral position")
-            
-            # Анализ тренда
-            trend = self._analyze_trend(df)
-            
-            # Поддержка и сопротивление
-            support, resistance = self._calculate_support_resistance(df)
+            eth_7d_ago = float(eth_df_1h['close'].iloc[-168]) if len(eth_df_1h) >= 168 else eth_price
+            eth_change_7d = ((eth_price / eth_7d_ago) - 1) * 100 if eth_7d_ago else 0
             
             return {
-                'current_price': current_price,
-                'rsi': rsi,
-                'macd': macd,
-                'macd_signal': macd_signal,
-                'macd_hist': macd_hist,
-                'ema20': ema20,
-                'ema50': ema50,
-                'ema200': ema200,
-                'bb_upper': bb_upper,
-                'bb_middle': bb_middle,
-                'bb_lower': bb_lower,
-                'bb_position': bb_position,
-                'trend': trend,
-                'support': support,
-                'resistance': resistance,
-                'volume_avg': df['volume'].tail(20).mean(),
-                'volume_current': df['volume'].iloc[-1]
+                'btc': {
+                    'price': btc_price,
+                    'change_24h': btc_ticker.get('percentage') or 0.0,
+                    'change_7d': btc_change_7d,
+                    'df_1h': btc_df_1h,
+                    'df_1d': btc_df_1d
+                },
+                'eth': {
+                    'price': eth_price,
+                    'change_24h': eth_ticker.get('percentage') or 0.0,
+                    'change_7d': eth_change_7d,
+                    'df_1h': eth_df_1h
+                }
             }
-            
         except Exception as e:
-            logger.error(f"Ошибка расчета индикаторов: {e}")
+            logger.error(f"Data fetch error: {e}")
             raise
     
-    def _analyze_trend(self, df: pd.DataFrame) -> str:
-        """Определение тренда на основе EMA"""
-        current_price = df['close'].iloc[-1]
-        ema20 = df['ema20'].iloc[-1]
-        ema50 = df['ema50'].iloc[-1]
-        ema200 = df['ema200'].iloc[-1]
+    def enrich_with_indicators(self, data: Dict) -> Dict:
+        """Добавление технических индикаторов"""
+        btc_df = data['btc']['df_1d'].copy()
+        btc_df['close'] = pd.to_numeric(btc_df['close'])
         
-        if current_price > ema20 > ema50 > ema200:
-            return "strong uptrend"
-        elif current_price > ema20 > ema50:
-            return "uptrend"
-        elif current_price < ema20 < ema50 < ema200:
-            return "strong downtrend"
-        elif current_price < ema20 < ema50:
-            return "downtrend"
-        else:
-            return "range-bound"
+        # RSI
+        rsi_indicator = ta.momentum.RSIIndicator(btc_df['close'], window=14)
+        data['btc']['rsi'] = float(rsi_indicator.rsi().iloc[-1])
+        
+        # EMAs
+        data['btc']['ema20'] = float(ta.trend.EMAIndicator(btc_df['close'], window=20).ema_indicator().iloc[-1])
+        data['btc']['ema50'] = float(ta.trend.EMAIndicator(btc_df['close'], window=50).ema_indicator().iloc[-1])
+        
+        ema200_series = ta.trend.EMAIndicator(btc_df['close'], window=200).ema_indicator()
+        data['btc']['ema200'] = float(ema200_series.iloc[-1]) if not pd.isna(ema200_series.iloc[-1]) else data['btc']['ema50']
+        
+        price = data['btc']['price']
+        data['btc']['above_ema20'] = price > data['btc']['ema20']
+        data['btc']['above_ema50'] = price > data['btc']['ema50']
+        data['btc']['above_ema200'] = price > data['btc']['ema200']
+        
+        # MACD
+        macd = ta.trend.MACD(btc_df['close'])
+        data['btc']['macd_hist'] = float(macd.macd_diff().iloc[-1])
+        
+        # Bollinger Bands position
+        bb = ta.volatility.BollingerBands(btc_df['close'], window=20, window_dev=2)
+        bb_upper = float(bb.bollinger_hband().iloc[-1])
+        bb_lower = float(bb.bollinger_lband().iloc[-1])
+        data['btc']['bb_position'] = ((price - bb_lower) / (bb_upper - bb_lower)) * 100 if bb_upper != bb_lower else 50
+        
+        # Volume ratio
+        vol_sma = btc_df['volume'].rolling(20).mean().iloc[-1]
+        data['btc']['vol_ratio'] = float(btc_df['volume'].iloc[-1] / vol_sma) if vol_sma > 0 else 1.0
+        
+        return data
     
-    def _calculate_support_resistance(self, df: pd.DataFrame) -> Tuple[float, float]:
-        """Расчет уровней поддержки и сопротивления"""
-        # Используем последние 30 свечей для определения уровней
-        recent_data = df.tail(30)
-        
-        # Поддержка - минимум последних свечей
-        support = recent_data['low'].min()
-        
-        # Сопротивление - максимум последних свечей
-        resistance = recent_data['high'].max()
-        
-        return support, resistance
+    # ═══════════════════════════════════════════════════════════
+    # REGIME CLASSIFICATION
+    # ═══════════════════════════════════════════════════════════
     
-    def calculate_market_regime(self, ta_data: Dict) -> Dict:
-        """
-        Определение рыночного режима: BULL/BEAR/TRANSITION
+    def classify_regime(self, data: Dict) -> Dict:
+        """Классификация рыночного режима"""
+        price = data['btc']['price']
+        rsi = data['btc'].get('rsi', 50)
+        above_ema20 = data['btc'].get('above_ema20', True)
+        above_ema50 = data['btc'].get('above_ema50', True)
+        change_7d = data['btc'].get('change_7d', 0)
+        macd_hist = data['btc'].get('macd_hist', 0)
         
-        Новая философия: не прогноз цены, а оценка режима и риска.
+        # Scoring
+        score = 0
         
-        Args:
-            ta_data: Технический анализ
-        
-        Returns:
-            Dict с regime, confidence, tail_risk, bias
-        """
-        # === REGIME SCORING ===
-        regime_score = 0
-        confidence_factors = []
-        
-        # 1. Trend structure (weight: 2)
-        trend = ta_data['trend']
-        price = ta_data['current_price']
-        
-        if 'uptrend' in trend.lower():
-            regime_score += 2
-            confidence_factors.append(('trend_aligned', True))
-        elif 'downtrend' in trend.lower():
-            regime_score -= 2
-            confidence_factors.append(('trend_aligned', True))
+        # EMA structure
+        if above_ema20 and above_ema50:
+            score += 2
+        elif not above_ema20 and not above_ema50:
+            score -= 2
+        elif above_ema20:
+            score += 1
         else:
-            confidence_factors.append(('trend_aligned', False))
+            score -= 1
         
-        # 2. Price vs EMAs (weight: 1 each)
-        above_ema20 = price > ta_data['ema20']
-        above_ema50 = price > ta_data['ema50']
-        above_ema200 = price > ta_data['ema200']
+        # 7d momentum
+        if change_7d > 8:
+            score += 2
+        elif change_7d > 3:
+            score += 1
+        elif change_7d < -8:
+            score -= 2
+        elif change_7d < -3:
+            score -= 1
         
-        ema_score = sum([above_ema20, above_ema50, above_ema200])
-        if ema_score >= 2:
-            regime_score += 1
-        elif ema_score <= 1:
-            regime_score -= 1
+        # RSI
+        if rsi > 60:
+            score += 1
+        elif rsi < 40:
+            score -= 1
         
-        # 3. Momentum (RSI context)
-        rsi = ta_data['rsi']
-        if rsi > 65:
-            regime_score += 1
-            confidence_factors.append(('momentum_strong', True))
-        elif rsi < 35:
-            regime_score -= 1
-            confidence_factors.append(('momentum_weak', True))
+        # MACD
+        if macd_hist > 0:
+            score += 1
         else:
-            confidence_factors.append(('momentum_neutral', True))
+            score -= 1
         
-        # 4. MACD trend
-        if ta_data['macd_hist'] > 0:
-            regime_score += 1
-        else:
-            regime_score -= 1
-        
-        # === DETERMINE REGIME ===
-        if regime_score >= 3:
+        # Determine regime
+        if score >= 4:
             regime = "BULL"
-        elif regime_score <= -3:
+            qualifier = None
+        elif score >= 2:
+            regime = "BULL"
+            qualifier = "early"
+        elif score <= -4:
             regime = "BEAR"
-        elif regime_score >= 1:
-            regime = "BULL (early)"
-        elif regime_score <= -1:
-            regime = "BEAR (early)"
+            qualifier = None
+        elif score <= -2:
+            regime = "BEAR"
+            qualifier = "early"
         else:
             regime = "TRANSITION"
+            qualifier = None
         
-        # === CONFIDENCE CALCULATION ===
-        # Base confidence from regime strength
-        base_confidence = min(abs(regime_score) * 15, 60)
+        # Confidence
+        base_conf = min(abs(score) * 12, 50)
+        if (above_ema20 and above_ema50) or (not above_ema20 and not above_ema50):
+            base_conf += 15
+        if (regime == "BULL" and rsi > 55) or (regime == "BEAR" and rsi < 45):
+            base_conf += 10
+        confidence = min(base_conf, 85)
         
-        # Adjust for trend alignment
-        trend_aligned = any(f[0] == 'trend_aligned' and f[1] for f in confidence_factors)
-        if trend_aligned:
-            base_confidence += 15
-        
-        # Adjust for momentum clarity
-        momentum_clear = rsi > 60 or rsi < 40
-        if momentum_clear:
-            base_confidence += 10
-        
-        # Cap confidence
-        confidence = min(base_confidence, 85)
-        
-        # === TAIL RISK ASSESSMENT ===
+        # Tail risk
         tail_risk = "INACTIVE"
-        tail_direction = None
+        tail_dir = None
+        bb_pos = data['btc'].get('bb_position', 50)
         
-        # Check for overextension (potential reversal risk)
-        bb_pos = ta_data['bb_position']
-        
-        if regime in ["BULL", "BULL (early)"]:
-            # In bull regime, tail risk is to downside
+        if regime == "BULL" or (qualifier == "early" and score > 0):
             if rsi > 75 or bb_pos > 90:
                 tail_risk = "ACTIVE"
-                tail_direction = "↓"
-                confidence = max(confidence - 20, 15)  # Reduce confidence
-            elif rsi > 70 or bb_pos > 80:
+                tail_dir = "↓"
+            elif rsi > 68 or bb_pos > 80:
                 tail_risk = "ELEVATED"
-                tail_direction = "↓"
-                confidence = max(confidence - 10, 20)
-        
-        elif regime in ["BEAR", "BEAR (early)"]:
-            # In bear regime, tail risk is further downside
+                tail_dir = "↓"
+        elif regime == "BEAR":
             if rsi < 25 or bb_pos < 10:
                 tail_risk = "ACTIVE"
-                tail_direction = "↓"
-            elif rsi < 30 or bb_pos < 20:
+                tail_dir = "↓"
+            elif rsi < 32 or bb_pos < 20:
                 tail_risk = "ELEVATED"
-                tail_direction = "↓"
+                tail_dir = "↓"
         
-        # === DIRECTIONAL BIAS ===
-        if regime in ["BULL", "BULL (early)"]:
-            if tail_risk == "ACTIVE":
-                bias = "Upside limited, reversal risk elevated"
-            else:
-                bias = "Directional upside favored"
-        elif regime in ["BEAR", "BEAR (early)"]:
-            if tail_risk == "ACTIVE":
-                bias = "Downside risk asymmetric, capitulation possible"
-            else:
-                bias = "Directional downside pressure"
-        else:
-            bias = "No clear directional edge"
+        # Format regime string
+        regime_str = f"{regime} ({qualifier})" if qualifier else regime
         
         return {
-            'regime': regime,
+            'regime': regime_str,
+            'regime_base': regime,
+            'qualifier': qualifier,
             'confidence': confidence,
             'tail_risk': tail_risk,
-            'tail_direction': tail_direction,
-            'bias': bias,
-            'regime_score': regime_score
+            'tail_direction': tail_dir,
+            'score': score
         }
     
-    def calculate_market_verdict(self, ta_data: Dict) -> str:
-        """
-        Legacy wrapper для совместимости.
-        Использует новую систему regime, но возвращает старый формат.
-        """
-        regime_data = self.calculate_market_regime(ta_data)
-        regime = regime_data['regime']
-        
-        if 'BULL' in regime:
-            return "Bullish"
-        elif 'BEAR' in regime:
-            return "Bearish"
-        else:
-            return "Neutral"
+    # ═══════════════════════════════════════════════════════════
+    # TRIGGER LOGIC
+    # ═══════════════════════════════════════════════════════════
     
-    def fetch_sp500_data(self) -> Dict:
-        """
-        Получение данных S&P 500
-        
-        Returns:
-            Словарь с данными S&P 500
-        """
-        try:
-            logger.info("Получение данных S&P 500")
-            
-            sp500 = yf.download('^GSPC', period='3mo', progress=False)
-            
-            # Проверка на пустой DataFrame
-            if sp500.empty or len(sp500) == 0:
-                logger.warning("S&P 500 data is empty, skipping")
-                return {
-                    'current_price': None,
-                    'change_1m': None
-                }
-            
-            current_price = sp500['Close'].iloc[-1]
-            price_1m_ago = sp500['Close'].iloc[-30] if len(sp500) >= 30 else sp500['Close'].iloc[0]
-            
-            change_1m = ((current_price - price_1m_ago) / price_1m_ago) * 100
-            
-            return {
-                'current_price': current_price,
-                'change_1m': change_1m
-            }
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения данных S&P 500: {e}")
-            return {
-                'current_price': None,
-                'change_1m': None
-            }
+    def get_round_level(self, price: float) -> int:
+        """Определение ближайшего круглого уровня (5k шаг)"""
+        return int(price // 5000) * 5000
     
-    def fetch_macro_data(self) -> Dict:
-        """
-        Получение макроэкономических данных
+    def check_triggers(self, data: Dict, regime_data: Dict) -> Tuple[bool, str]:
+        """Проверка триггеров публикации"""
+        triggers = []
         
-        Returns:
-            Словарь с макроэкономическими данными
-        """
-        macro_data = {
-            'fed_rate': None,
-            'qe_status': 'неизвестно'
-        }
+        # 1. Значительное движение 24h (>5%)
+        btc_change = abs(data['btc']['change_24h'])
+        if btc_change > 5.0:
+            triggers.append(f"BTC {data['btc']['change_24h']:+.1f}% за 24h")
         
-        if not self.fred:
-            logger.warning("FRED API недоступен, пропуск макроданных")
-            return macro_data
+        # 2. Значительное движение 7d (>10%)
+        btc_7d = abs(data['btc'].get('change_7d', 0))
+        if btc_7d > 10.0:
+            triggers.append(f"BTC {data['btc']['change_7d']:+.1f}% за 7d")
         
-        try:
-            logger.info("Получение данных ФРС")
+        # 3. Смена режима
+        current_regime = regime_data['regime']
+        last_regime = self.state.get('last_regime')
+        if last_regime and current_regime != last_regime:
+            triggers.append(f"Режим: {last_regime} → {current_regime}")
+        
+        # 4. Пробой круглого уровня
+        current_level = self.get_round_level(data['btc']['price'])
+        last_level = self.state.get('last_round_level')
+        
+        if last_level and current_level != last_level:
+            # Cooldown 4 часа
+            last_round_pub = self.state.get('last_round_publish')
+            cooldown_ok = True
             
-            # Federal Funds Rate (эффективная ставка ФРС)
-            fed_rate_series = self.fred.get_series('DFF')
-            macro_data['fed_rate'] = fed_rate_series.iloc[-1]
+            if last_round_pub:
+                try:
+                    elapsed = (datetime.utcnow() - datetime.fromisoformat(last_round_pub)).total_seconds()
+                    cooldown_ok = elapsed > 4 * 3600
+                except:
+                    pass
             
-            logger.info(f"Ставка ФРС: {macro_data['fed_rate']}%")
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения макроданных: {e}")
+            if cooldown_ok:
+                direction = "выше" if current_level > last_level else "ниже"
+                triggers.append(f"BTC пробил {direction} ${current_level:,}")
+                self.state['last_round_publish'] = datetime.utcnow().isoformat()
         
-        return macro_data
+        # 5. Tail risk активен
+        if regime_data['tail_risk'] == "ACTIVE":
+            triggers.append("Tail risk ACTIVE")
+        
+        return (len(triggers) > 0, ' | '.join(triggers) if triggers else '')
     
-    def calculate_btc_sp500_correlation(self, btc_df: pd.DataFrame) -> Optional[float]:
-        """
-        Расчет корреляции BTC и S&P 500
-        
-        Args:
-            btc_df: DataFrame с данными BTC
-        
-        Returns:
-            Коэффициент корреляции или None
-        """
-        try:
-            # Получаем S&P 500 за тот же период
-            start_date = btc_df.index[0].strftime('%Y-%m-%d')
-            end_date = btc_df.index[-1].strftime('%Y-%m-%d')
-            
-            sp500 = yf.download('^GSPC', start=start_date, end=end_date, progress=False)
-            
-            # Проверка на пустой DataFrame
-            if sp500.empty or len(sp500) < 20:
-                logger.warning(f"S&P 500 data insufficient for correlation: {len(sp500) if not sp500.empty else 0} rows")
-                return None
-            
-            # Приводим к дневным данным для корреляции
-            btc_daily = btc_df['close'].resample('D').last()
-            sp500_daily = sp500['Close']
-            
-            # Объединяем и считаем корреляцию
-            combined = pd.DataFrame({
-                'btc': btc_daily,
-                'sp500': sp500_daily
-            }).dropna()
-            
-            # Строгая проверка минимума данных
-            if len(combined) < 20:
-                logger.warning(f"Not enough overlapping data for correlation: {len(combined)} rows (minimum 20 required)")
-                return None
-            
-            correlation = combined['btc'].corr(combined['sp500'])
-            
-            return correlation
-            
-        except Exception as e:
-            logger.error(f"Ошибка расчета корреляции: {e}")
-            return None
+    # ═══════════════════════════════════════════════════════════
+    # INTERPRETATION
+    # ═══════════════════════════════════════════════════════════
     
-    def calculate_eth_sp500_correlation(self, eth_df: pd.DataFrame) -> Optional[float]:
-        """
-        Расчет корреляции ETH и S&P 500
+    def build_interpretation(self, data: Dict, regime_data: Dict) -> list:
+        """Построение интерпретации"""
+        lines = []
+        regime = regime_data['regime_base']
+        rsi = data['btc'].get('rsi', 50)
+        change_24h = data['btc'].get('change_24h', 0)
+        change_7d = data['btc'].get('change_7d', 0)
+        above_ema20 = data['btc'].get('above_ema20', True)
+        above_ema50 = data['btc'].get('above_ema50', True)
+        vol_ratio = data['btc'].get('vol_ratio', 1.0)
         
-        Args:
-            eth_df: DataFrame с данными ETH
-        
-        Returns:
-            Коэффициент корреляции или None
-        """
-        try:
-            # Получаем S&P 500 за тот же период
-            start_date = eth_df.index[0].strftime('%Y-%m-%d')
-            end_date = eth_df.index[-1].strftime('%Y-%m-%d')
-            
-            sp500 = yf.download('^GSPC', start=start_date, end=end_date, progress=False)
-            
-            # Проверка на пустой DataFrame
-            if sp500.empty or len(sp500) < 20:
-                logger.warning(f"S&P 500 data insufficient for ETH correlation: {len(sp500) if not sp500.empty else 0} rows")
-                return None
-            
-            # Приводим к дневным данным для корреляции
-            eth_daily = eth_df['close'].resample('D').last()
-            sp500_daily = sp500['Close']
-            
-            # Объединяем и считаем корреляцию
-            combined = pd.DataFrame({
-                'eth': eth_daily,
-                'sp500': sp500_daily
-            }).dropna()
-            
-            # Строгая проверка минимума данных
-            if len(combined) < 20:
-                logger.warning(f"Not enough overlapping data for ETH correlation: {len(combined)} rows (minimum 20 required)")
-                return None
-            
-            correlation = combined['eth'].corr(combined['sp500'])
-            
-            return correlation
-            
-        except Exception as e:
-            logger.error(f"Ошибка расчета ETH корреляции: {e}")
-            return None
-    
-    def fetch_eth_data(self, timeframe: str, limit: int) -> pd.DataFrame:
-        """
-        Получение исторических данных ETH
-        
-        Args:
-            timeframe: Таймфрейм (1h, 4h, 1d, 1w)
-            limit: Количество свечей
-        
-        Returns:
-            DataFrame с OHLCV данными
-        """
-        try:
-            logger.info(f"Получение данных ETH/{timeframe} (limit={limit})")
-            
-            ohlcv = self.exchange.fetch_ohlcv('ETH/USD', timeframe, limit=limit)
-            
-            df = pd.DataFrame(
-                ohlcv, 
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            
-            logger.info(f"Получено {len(df)} свечей ETH для {timeframe}")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения данных ETH: {e}")
-            raise
-    
-    def validate_market_data(self, df: pd.DataFrame, symbol: str, min_hours: int) -> bool:
-        """
-        Валидация рыночных данных
-        
-        Args:
-            df: DataFrame с данными
-            symbol: Символ актива (для логирования)
-            min_hours: Минимальное количество часов данных
-        
-        Returns:
-            True если данные валидны, False если нет
-        """
-        if df.empty:
-            logger.error(f"{symbol} dataset is empty")
-            return False
-        
-        if len(df) < min_hours:
-            logger.error(f"{symbol} insufficient data: {len(df)}h < {min_hours}h required")
-            return False
-        
-        if df['close'].isna().any():
-            logger.error(f"{symbol} contains NaN values in close prices")
-            return False
-        
-        if (df['close'] <= 0).any():
-            logger.error(f"{symbol} contains invalid prices (<=0)")
-            return False
-        
-        return True
-    
-    def check_eth_post_conditions(
-        self, 
-        eth_df_1h: pd.DataFrame,
-        btc_df_1h: pd.DataFrame
-    ) -> Tuple[bool, str]:
-        """
-        Проверка условий для отдельного поста по ETH
-        
-        Условия:
-        1. ETH ведёт рынок (ETH/BTC растёт, ETH волатильнее)
-        2. Есть собственный поток капитала
-        3. Структурное событие
-        4. Нарративный сдвиг
-        
-        Args:
-            eth_df_1h: DataFrame с данными ETH 1h
-            btc_df_1h: DataFrame с данными BTC 1h
-        
-        Returns:
-            (should_post, reason)
-        """
-        try:
-            logger.info("Проверка условий для ETH поста")
-            
-            # Валидация входных данных
-            MIN_HOURS_7D = 168  # 7 days
-            MIN_HOURS_24H = 24  # 1 day
-            
-            if not self.validate_market_data(eth_df_1h, "ETH", MIN_HOURS_7D):
-                return (False, "Invalid ETH data - insufficient or corrupt")
-            
-            if not self.validate_market_data(btc_df_1h, "BTC", MIN_HOURS_7D):
-                return (False, "Invalid BTC data - insufficient or corrupt")
-            
-            # Условие 1: ETH ведёт рынок
-            # Проверяем ETH/BTC ratio за последние 7 дней
-            # Используем среднее 3 последних свечей для стабильности
-            eth_price_now = eth_df_1h['close'].iloc[-3:].mean()
-            btc_price_now = btc_df_1h['close'].iloc[-3:].mean()
-            eth_price_7d = eth_df_1h['close'].iloc[-MIN_HOURS_7D:-MIN_HOURS_7D+3].mean()
-            btc_price_7d = btc_df_1h['close'].iloc[-MIN_HOURS_7D:-MIN_HOURS_7D+3].mean()
-            
-            eth_btc_ratio_now = eth_price_now / btc_price_now
-            eth_btc_ratio_7d_ago = eth_price_7d / btc_price_7d
-            
-            eth_btc_change = ((eth_btc_ratio_now / eth_btc_ratio_7d_ago) - 1) * 100
-            
-            if eth_btc_change > 2.0:  # ETH/BTC вырос >2% за неделю
-                reason = f"ETH/BTC ratio up {eth_btc_change:.1f}% (7d) - ETH leading market"
-                logger.info(f"ETH post condition met: {reason}")
-                return (True, reason)
-            
-            # Проверяем волатильность за последние 24 часа
-            eth_volatility_24h = eth_df_1h['close'].iloc[-MIN_HOURS_24H:].pct_change().std() * 100
-            btc_volatility_24h = btc_df_1h['close'].iloc[-MIN_HOURS_24H:].pct_change().std() * 100
-            
-            # BUG FIX: Check for NaN volatility before comparison
-            if pd.notna(eth_volatility_24h) and pd.notna(btc_volatility_24h):
-                if eth_volatility_24h > btc_volatility_24h * 1.5:  # ETH волатильнее на 50%+
-                    reason = f"ETH volatility {eth_volatility_24h:.2f}% vs BTC {btc_volatility_24h:.2f}% (24h) - independent movement"
-                    logger.info(f"ETH post condition met: {reason}")
-                    return (True, reason)
+        # Structure
+        if regime == "BEAR":
+            if change_24h > 2:
+                lines.append("Short-term bounce в рамках нисходящего тренда")
             else:
-                logger.warning(f"Volatility calculation returned NaN - skipping volatility check")
-            
-            # Проверяем divergence: BTC flat, ETH движется
-            btc_change_24h = ((btc_df_1h['close'].iloc[-1] / btc_df_1h['close'].iloc[-MIN_HOURS_24H]) - 1) * 100
-            eth_change_24h = ((eth_df_1h['close'].iloc[-1] / eth_df_1h['close'].iloc[-MIN_HOURS_24H]) - 1) * 100
-            
-            if abs(btc_change_24h) < 1.0 and abs(eth_change_24h) > 3.0:  # BTC <1%, ETH >3%
-                reason = f"Divergence: BTC {btc_change_24h:+.1f}%, ETH {eth_change_24h:+.1f}% (24h)"
-                logger.info(f"ETH post condition met: {reason}")
-                return (True, reason)
-            
-            logger.info("ETH post conditions not met - skipping separate ETH forecast")
-            return (False, "No significant ETH-specific catalyst")
-            
-        except Exception as e:
-            logger.error(f"Ошибка проверки ETH условий: {e}")
-            return (False, f"Error checking conditions: {e}")
+                lines.append("Ценовая структура остаётся медвежьей")
+        elif regime == "BULL":
+            if change_24h < -2:
+                lines.append("Краткосрочная коррекция в рамках восходящего тренда")
+            else:
+                lines.append("Ценовая структура остаётся бычьей")
+        else:
+            lines.append("Рынок в переходном состоянии")
+        
+        # Momentum
+        if rsi > 70:
+            lines.append("Моментум перегрет — риск отката")
+        elif rsi < 30:
+            lines.append("Моментум перепродан — возможен отскок")
+        elif (regime == "BEAR" and rsi < 45) or (regime == "BULL" and rsi > 55):
+            lines.append("Моментум подтверждает текущий режим")
+        else:
+            lines.append("Моментум нейтральный")
+        
+        # Volume
+        if vol_ratio < 0.6:
+            lines.append("Объёмы аномально низкие")
+        elif vol_ratio > 1.5:
+            lines.append("Повышенные объёмы — возможно начало движения")
+        
+        # EMA structure
+        if not above_ema20 and not above_ema50 and regime == "BEAR":
+            lines.append("Цена ниже ключевых MA — слабость подтверждена")
+        elif above_ema20 and above_ema50 and regime == "BULL":
+            lines.append("Цена выше ключевых MA — сила подтверждена")
+        
+        return lines[:4]  # Max 4 lines
     
-    def generate_ai_forecast(
-        self,
-        ta_weekly: Dict,
-        ta_monthly: Dict,
-        ta_yearly: Dict,
-        sp500_data: Dict,
-        macro_data: Dict,
-        correlation: Optional[float]
-    ) -> str:
-        """
-        Генерация AI прогноза на основе технического анализа и макроданных
-        
-        Args:
-            ta_weekly: Технический анализ для недельного прогноза
-            ta_monthly: Технический анализ для месячного прогноза
-            ta_yearly: Технический анализ для годового прогноза
-            sp500_data: Данные S&P 500
-            macro_data: Макроэкономические данные
-            correlation: Корреляция BTC-SPX
-        
-        Returns:
-            Текст AI прогноза
-        """
+    # ═══════════════════════════════════════════════════════════
+    # AI FORECAST
+    # ═══════════════════════════════════════════════════════════
+    
+    def generate_ai_analysis(self, data: Dict, regime_data: Dict) -> str:
+        """Генерация AI анализа"""
         try:
-            logger.info("Генерация AI прогноза")
+            price = data['btc']['price']
+            rsi = data['btc'].get('rsi', 50)
+            ema200 = data['btc'].get('ema200', price)
+            change_7d = data['btc'].get('change_7d', 0)
             
-            # Формируем контекст для GPT
-            context = self._build_context(
-                ta_weekly, ta_monthly, ta_yearly,
-                sp500_data, macro_data, correlation
-            )
-            
-            # Промпт для GPT - v4.0 REGIME-BASED формат
-            system_prompt = """ROLE:
-You are a risk-focused crypto market analyst. You provide REGIME ASSESSMENT, not price predictions.
-
-CORE PHILOSOPHY:
-❌ NOT: "What if price goes up/down?"
-✅ YES: "What is the current market state and what actions are appropriate?"
-
-This is regime-based analysis, not price forecasting.
-Levels are references, NOT trade triggers.
-Regime overrides price patterns.
-
-STRUCTURE (STRICT - follow exactly):
-
-Market regime: [BULL/BEAR/TRANSITION] [(early) if applicable]
-Confidence: [LOW/MODERATE/HIGH] ([X]%)
-Tail risk: [INACTIVE/ELEVATED/ACTIVE] [↑/↓ if active]
+            system_prompt = """You are a crypto market regime analyst. Output ONLY the following sections, nothing else:
 
 Bias:
-• [Primary directional statement]
-• [Risk asymmetry statement]
+• [1 sentence about directional pressure]
+• [1 sentence about risk asymmetry]
 
 Key implication:
-[One sentence: What does this regime MEAN for positioning? Is this a breakout environment or not?]
+[1 sentence: what this regime means for positioning]
 
 Directional policy:
 • Longs: [encouraged/neutral/discouraged]
 • Shorts: [encouraged/tactical only/discouraged]
-• Position size: [normal/reduced/capped]
 
 Reference zones (not signals):
-• $[X] — [what happens if breached, e.g. "invalidation of bearish bias"]
-• $[Y] — [what happens if breached, e.g. "acceleration risk zone"]
-
-What would change the view:
-• [Condition 1 that would shift regime]
-• [Condition 2]
-
-FORMATTING RULES:
-* NO bold text anywhere
-* NO "Bull case / Bear case" framing
-* NO "consider long/short" language
-* NO price targets or predictions
-* NO emojis except these: ⚡
-* NO hashtags
-* Zones are REFERENCES not SIGNALS
-* Keep it under 200 words
-
-LANGUAGE RULES:
-❌ FORBIDDEN: "support", "resistance" as action triggers
-❌ FORBIDDEN: "targets $X", "could reach", "expect"
-❌ FORBIDDEN: Technical indicator names (RSI, MACD, EMA)
-❌ FORBIDDEN: "significant", "strong", "weak"
-✅ ALLOWED: "regime", "bias", "policy", "risk", "zone", "invalidation"
-✅ ALLOWED: "if breached", "would shift", "implies"
-
-QUALITY CHECKS:
-1. Is this about REGIME, not price prediction?
-2. Are zones framed as references, not signals?
-3. Is there a clear POLICY (what to do), not just forecast?
-4. Would this make sense if price does the OPPOSITE?
-5. Under 200 words?
-
-CRITICAL:
-Never say "if Bitcoin breaks above X, target is Y" — this is old paradigm.
-Instead say "X is invalidation zone for current bearish bias" — this is regime thinking."""
-
-            # Получаем данные режима
-            regime_data = self.calculate_market_regime(ta_weekly)
-            
-            user_prompt = f"""Current regime analysis:
-- Regime: {regime_data['regime']}
-- Confidence: {regime_data['confidence']}%
-- Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
-- Bias: {regime_data['bias']}
-
-Market data:
-{context}
-
-Generate regime-based market bulletin following the EXACT structure specified.
-Remember: This is NOT a price forecast. This is a regime assessment with policy implications."""
-
-            # Запрос к GPT
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=800
-            )
-            
-            forecast = response.choices[0].message.content
-            logger.info("AI прогноз успешно сгенерирован")
-            
-            return forecast
-            
-        except Exception as e:
-            logger.error(f"Ошибка генерации AI прогноза: {e}")
-            raise
-    
-    def _build_context(
-        self,
-        ta_weekly: Dict,
-        ta_monthly: Dict,
-        ta_yearly: Dict,
-        sp500_data: Dict,
-        macro_data: Dict,
-        correlation: Optional[float]
-    ) -> str:
-        """Формирование контекста для GPT"""
-        
-        price = ta_weekly['current_price']
-        
-        # Простое описание позиции цены без терминологии индикаторов
-        rsi_1h = ta_weekly['rsi']
-        momentum_status = "stretched upside" if rsi_1h > 70 else "oversold" if rsi_1h < 30 else "neutral"
-        
-        macd_trend = "positive" if ta_weekly['macd_hist'] > 0 else "negative"
-        
-        price_vs_ma = "above key moving average" if price > ta_weekly['ema20'] else "below key moving average"
-        
-        bb_pos = ta_weekly['bb_position']
-        range_position = "upper boundary" if bb_pos > 80 else "lower boundary" if bb_pos < 20 else "mid-range"
-        
-        context = f"""MARKET DATA - BTC/USD
-
-Current Price: ${price:,.2f}
-
-Price Structure:
-- Momentum: {momentum_status} ({rsi_1h:.1f})
-- Short-term trend: {macd_trend}
-- Position: {price_vs_ma}
-- Range position: {range_position} ({bb_pos:.1f}%)
-- Immediate support: ${ta_weekly['support']:,.2f}
-- Immediate resistance: ${ta_weekly['resistance']:,.2f}
-- Local trend: {ta_weekly['trend']}
-
-Medium-term levels:
-- Support zone: ${ta_monthly['support']:,.2f}
-- Resistance zone: ${ta_monthly['resistance']:,.2f}
-- Trend character: {ta_monthly['trend']}
-
-Long-term context:
-- Major trend: {ta_yearly['trend']}
-- Annual support: ${ta_yearly['support']:,.2f}
-- Annual resistance: ${ta_yearly['resistance']:,.2f}
-
-MACRO BACKDROP:"""
-        
-        if sp500_data['current_price']:
-            context += f"""
-- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)
-- Risk appetite: {"positive" if sp500_data['change_1m'] > 0 else "negative"}"""
-        
-        if correlation is not None:
-            corr_strength = "strong" if abs(correlation) > 0.7 else "moderate" if abs(correlation) > 0.4 else "weak"
-            corr_direction = "positive" if correlation > 0 else "negative"
-            context += f"""
-- BTC-equity correlation: {corr_strength} {corr_direction} ({correlation:.2f})"""
-        
-        if macro_data['fed_rate']:
-            context += f"""
-- Federal Funds Rate: {macro_data['fed_rate']:.2f}% (restrictive territory)"""
-        else:
-            context += f"""
-- Monetary policy: data unavailable"""
-        
-        return context
-    
-    def generate_eth_forecast(
-        self,
-        ta_weekly: Dict,
-        ta_monthly: Dict,
-        ta_yearly: Dict,
-        eth_btc_context: str,
-        sp500_data: Dict,
-        macro_data: Dict,
-        correlation: Optional[float]
-    ) -> str:
-        """
-        Генерация AI прогноза для ETH (regime-based)
-        
-        Args:
-            ta_weekly: Технический анализ для недельного прогноза
-            ta_monthly: Технический анализ для месячного прогноза
-            ta_yearly: Технический анализ для годового прогноза
-            eth_btc_context: Контекст ETH/BTC positioning
-            sp500_data: Данные S&P 500
-            macro_data: Макроэкономические данные
-            correlation: Корреляция ETH-SPX
-        
-        Returns:
-            Текст AI прогноза для ETH
-        """
-        try:
-            logger.info("Генерация AI прогноза для ETH")
-            
-            # Рассчитываем regime для ETH
-            regime_data = self.calculate_market_regime(ta_weekly)
-            
-            price = ta_weekly['current_price']
-            
-            context = f"""MARKET DATA - ETH/USD
-
-Current Price: ${price:,.2f}
-Reference zones: ${ta_weekly['support']:,.2f} | ${ta_weekly['resistance']:,.2f}
-Trend: {ta_weekly['trend']}
-
-Medium-term levels:
-- Lower zone: ${ta_monthly['support']:,.2f}
-- Upper zone: ${ta_monthly['resistance']:,.2f}
-- Trend character: {ta_monthly['trend']}
-
-Long-term context:
-- Major trend: {ta_yearly['trend']}
-- Annual lower: ${ta_yearly['support']:,.2f}
-- Annual upper: ${ta_yearly['resistance']:,.2f}
-
-ETH-SPECIFIC CONTEXT:
-{eth_btc_context}
-
-MACRO BACKDROP:"""
-            
-            if sp500_data['current_price'] is not None:
-                context += f"""
-- S&P 500: ${sp500_data['current_price']:,.2f} ({sp500_data['change_1m']:+.1f}% monthly)
-- Risk appetite: {"positive" if sp500_data['change_1m'] > 0 else "negative"}"""
-            
-            if correlation is not None:
-                corr_strength = "strong" if abs(correlation) > 0.7 else "moderate" if abs(correlation) > 0.4 else "weak"
-                corr_direction = "positive" if correlation > 0 else "negative"
-                context += f"""
-- ETH-equity correlation: {corr_strength} {corr_direction} ({correlation:.2f})"""
-            
-            if macro_data.get('fed_rate'):
-                context += f"""
-- Federal Funds Rate: {macro_data['fed_rate']:.2f}%"""
-            else:
-                context += f"""
-- Monetary policy: data unavailable"""
-
-            # v4.0 REGIME-BASED промпт для ETH
-            system_prompt = """ROLE:
-You are a risk-focused crypto market analyst. You provide REGIME ASSESSMENT for Ethereum, not price predictions.
-
-CORE PHILOSOPHY:
-❌ NOT: "What if ETH price goes up/down?"
-✅ YES: "What is ETH's current market state and what actions are appropriate?"
-
-ETH-SPECIFIC FACTORS TO CONSIDER:
-* ETH/BTC ratio dynamics (is ETH leading or lagging?)
-* Staking yield environment
-* Layer 2 activity
-* ETF flow context
-
-STRUCTURE (STRICT - follow exactly):
-
-Market regime: [BULL/BEAR/TRANSITION] [(early) if applicable]
-Confidence: [LOW/MODERATE/HIGH] ([X]%)
-Tail risk: [INACTIVE/ELEVATED/ACTIVE] [↑/↓ if active]
-
-Bias:
-• [Primary directional statement]
-• [ETH vs BTC relative statement]
-
-Key implication:
-[One sentence: What does this regime MEAN for ETH positioning?]
-
-Directional policy:
-• Longs: [encouraged/neutral/discouraged]
-• Shorts: [encouraged/tactical only/discouraged]
-• ETH/BTC ratio: [favor ETH/neutral/favor BTC]
-
-Reference zones (not signals):
-• $[X] — [what happens if breached]
-• $[Y] — [what happens if breached]
+• $[X] — [what breach means]
+• $[Y] — [what breach means]
 
 What would change the view:
 • [Condition 1]
 • [Condition 2]
 
-FORMATTING RULES:
-* NO bold text anywhere
-* NO "Bull case / Bear case" framing
-* NO price targets or predictions
-* NO emojis except: ⚡
-* NO hashtags
-* Keep it under 180 words
+RULES:
+- NO bold, NO emojis, NO hashtags
+- Under 150 words
+- Zones are REFERENCES not trade signals
+- Use "breach would imply" language"""
 
-LANGUAGE RULES:
-❌ FORBIDDEN: "support", "resistance" as triggers
-❌ FORBIDDEN: "targets $X", "could reach"
-❌ FORBIDDEN: Technical indicator names
-✅ ALLOWED: "regime", "bias", "policy", "invalidation"
+            user_prompt = f"""Regime: {regime_data['regime']}
+Confidence: {regime_data['confidence']}%
+Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
+Score: {regime_data['score']}
 
-CRITICAL:
-This is regime assessment, not price forecasting."""
+BTC Price: ${price:,.0f}
+RSI: {rsi:.1f}
+EMA200: ${ema200:,.0f}
+7d change: {change_7d:+.1f}%
 
-            user_prompt = f"""Current ETH regime analysis:
-- Regime: {regime_data['regime']}
-- Confidence: {regime_data['confidence']}%
-- Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
-- Bias: {regime_data['bias']}
+Generate regime analysis."""
 
-Market data:
-{context}
-
-Generate regime-based ETH bulletin following the EXACT structure specified."""
-
-            # Запрос к GPT
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -1047,288 +430,202 @@ Generate regime-based ETH bulletin following the EXACT structure specified."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=700
+                max_tokens=500
             )
             
-            forecast = response.choices[0].message.content.strip()
-            
-            logger.info("ETH прогноз успешно сгенерирован")
-            return forecast
+            return response.choices[0].message.content
             
         except Exception as e:
-            logger.error(f"Ошибка генерации ETH прогноза: {e}")
-            raise
+            logger.error(f"AI generation error: {e}")
+            return self._fallback_analysis(data, regime_data)
     
-    def format_telegram_message(self, ta_weekly: Dict, forecast: str) -> str:
-        """
-        Форматирование сообщения для Telegram
+    def _fallback_analysis(self, data: Dict, regime_data: Dict) -> str:
+        """Fallback анализ без AI"""
+        regime = regime_data['regime_base']
+        price = data['btc']['price']
+        ema200 = data['btc'].get('ema200', price)
         
-        Args:
-            ta_weekly: Технический анализ для текущих данных
-            forecast: AI прогноз (regime-based bulletin)
+        if regime == "BEAR":
+            return f"""Bias:
+• Directional downside pressure persists
+• Risk asymmetry favors downside moves
+
+Key implication:
+Current conditions favor capital preservation over aggressive positioning.
+
+Directional policy:
+• Longs: discouraged
+• Shorts: tactical only
+• Position size: reduced
+
+Reference zones (not signals):
+• ${ema200:,.0f} — breach above would imply bias invalidation
+• ${price * 0.9:,.0f} — breach below would imply acceleration
+
+What would change the view:
+• Sustained move above EMA200
+• Shift in macro risk sentiment"""
+        else:
+            return f"""Bias:
+• Directional structure improving
+• Risk asymmetry shifting neutral
+
+Key implication:
+Market in transition, await confirmation before aggressive positioning.
+
+Directional policy:
+• Longs: neutral
+• Shorts: discouraged
+• Position size: normal
+
+Reference zones (not signals):
+• ${price * 1.05:,.0f} — breach would confirm strength
+• ${price * 0.95:,.0f} — breach would resume weakness
+
+What would change the view:
+• Clear break of current range
+• Volume confirmation"""
+    
+    # ═══════════════════════════════════════════════════════════
+    # MESSAGE FORMATTING
+    # ═══════════════════════════════════════════════════════════
+    
+    def format_message(self, data: Dict, regime_data: Dict, trigger_reason: str, ai_analysis: str) -> str:
+        """Форматирование сообщения для Telegram"""
         
-        Returns:
-            Отформатированное сообщение
-        """
-        price = ta_weekly['current_price']
+        regime = regime_data['regime']
+        confidence = regime_data['confidence']
+        tail_risk = regime_data['tail_risk']
+        tail_dir = regime_data['tail_direction'] or ''
         
-        message = f"""<b>BITCOIN · MARKET STATE UPDATE</b>
+        btc_price = data['btc']['price']
+        btc_24h = data['btc']['change_24h']
+        btc_7d = data['btc'].get('change_7d', 0)
+        eth_price = data['eth']['price']
+        eth_24h = data['eth']['change_24h']
+        
+        # Regime emoji
+        if 'BULL' in regime:
+            regime_emoji = '🟢'
+        elif 'BEAR' in regime:
+            regime_emoji = '🔴'
+        else:
+            regime_emoji = '🟡'
+        
+        # Interpretation
+        interpretation = self.build_interpretation(data, regime_data)
+        interp_text = '\n'.join([f"• {line}" for line in interpretation])
+        
+        message = f"""<b>BITCOIN · MARKET STATE</b>
 
-BTC ${price:,.0f}
+{regime_emoji} <b>{regime}</b>
+Confidence: {confidence}%
+Tail risk: {tail_risk} {tail_dir}
 
-{forecast}
+<b>Prices</b>
+• BTC: ${btc_price:,.0f} ({btc_24h:+.1f}% 24h | {btc_7d:+.1f}% 7d)
+• ETH: ${eth_price:,.0f} ({eth_24h:+.1f}% 24h)
 
-<i>OracAI · Regime Analysis | {datetime.now().strftime('%d %b %Y %H:%M UTC')}</i>
-"""
+<b>Interpretation</b>
+{interp_text}
+
+{ai_analysis}
+
+<b>What changed</b>
+{trigger_reason}
+
+<i>OracAI Radar | {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}</i>"""
         
         return message
     
-    def generate_tradingview_chart(self) -> Optional[str]:
-        """
-        Генерация скриншота графика TradingView
-        
-        Returns:
-            Путь к файлу скриншота или None при ошибке
-        """
-        try:
-            logger.info("Генерация скриншота TradingView")
-            
-            with sync_playwright() as p:
-                # Запуск браузера в headless режиме с user-agent
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=['--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
-                )
-                page = browser.new_page(viewport={'width': 1200, 'height': 800})
-                
-                # Открываем TradingView график BTC/USD
-                url = "https://www.tradingview.com/chart/?symbol=BITSTAMP%3ABTCUSD&interval=D"
-                page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                
-                # Ждем загрузки графика (ищем canvas элемент)
-                try:
-                    page.wait_for_selector('canvas', timeout=10000)
-                    page.wait_for_timeout(2000)  # Дополнительная пауза для рендеринга
-                    logger.info("График TradingView загружен")
-                except Exception as wait_error:
-                    logger.warning(f"Canvas не найден, делаем скриншот anyway: {wait_error}")
-                    page.wait_for_timeout(3000)  # Fallback timeout
-                
-                # Создаем временный файл для скриншота
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                screenshot_path = temp_file.name
-                temp_file.close()
-                
-                # Делаем скриншот
-                page.screenshot(path=screenshot_path, full_page=False)
-                
-                browser.close()
-                
-                logger.info(f"Скриншот сохранен: {screenshot_path}")
-                return screenshot_path
-                
-        except Exception as e:
-            logger.error(f"Ошибка генерации скриншота TradingView: {e}")
-            return None
-            return None
+    # ═══════════════════════════════════════════════════════════
+    # TELEGRAM
+    # ═══════════════════════════════════════════════════════════
     
-    def publish_to_telegram(self, message: str, chart_path: Optional[str] = None):
-        """
-        Публикация сообщения в Telegram канал
-        
-        Args:
-            message: Текст сообщения
-            chart_path: Путь к файлу графика (опционально)
-        """
+    def publish_telegram(self, message: str):
+        """Публикация в Telegram"""
         try:
-            logger.info(f"Публикация в Telegram канал: {self.channel_id}")
-            
-            # Telegram имеет лимит 4096 символов
-            if len(message) > 4096:
-                logger.warning(f"Message too long ({len(message)} chars), truncating to 4090")
-                message = message[:4090] + "\n..."
-            
-            # Отправка графика если есть
-            if chart_path:
-                try:
-                    url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
-                    
-                    with open(chart_path, 'rb') as photo:
-                        files = {'photo': photo}
-                        payload = {
-                            'chat_id': self.channel_id,
-                            'caption': 'BTC/USD Chart'
-                        }
-                        
-                        response = requests.post(url, data=payload, files=files, timeout=30)
-                        response.raise_for_status()
-                        
-                        logger.info("График успешно отправлен")
-                    
-                    # Удаляем временный файл
-                    if os.path.exists(chart_path):
-                        try:
-                            os.unlink(chart_path)
-                            logger.info(f"Временный файл удален: {chart_path}")
-                        except Exception as cleanup_error:
-                            logger.warning(f"Не удалось удалить временный файл: {cleanup_error}")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка отправки графика: {e}")
-                    # Продолжаем отправку текста даже если график не отправился
-            
-            # Отправка текстового прогноза
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             payload = {
                 'chat_id': self.channel_id,
                 'text': message,
                 'parse_mode': 'HTML'
             }
-            
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            
-            result = response.json()
-            if result.get('ok'):
-                logger.info("Сообщение успешно опубликовано")
-            else:
-                logger.error(f"Telegram API error: {result}")
-                raise Exception(f"Telegram API returned ok=false: {result}")
-            
+            logger.info("Published to Telegram")
         except Exception as e:
-            logger.error(f"Ошибка публикации в Telegram: {e}")
+            logger.error(f"Telegram error: {e}")
             raise
     
+    # ═══════════════════════════════════════════════════════════
+    # MAIN RUN
+    # ═══════════════════════════════════════════════════════════
+    
     def run(self):
-        """Основной метод запуска бота"""
+        """Основной метод"""
         try:
             logger.info("=" * 50)
-            logger.info("Запуск BTC Forecast Bot")
+            logger.info("OracAI Radar starting")
             logger.info("=" * 50)
             
-            # 1. Получаем данные BTC для разных таймфреймов
-            logger.info("Шаг 1: Получение данных BTC")
-            df_1h = self.fetch_btc_data('1h', limit=168)  # Неделя
-            df_1d = self.fetch_btc_data('1d', limit=90)   # ~3 месяца
-            df_1w = self.fetch_btc_data('1w', limit=52)   # Год
+            # 1. Fetch data
+            logger.info("Step 1: Fetching market data")
+            data = self.fetch_market_data()
             
-            # 2. Рассчитываем технические индикаторы
-            logger.info("Шаг 2: Расчет технических индикаторов")
-            ta_weekly = self.calculate_technical_indicators(df_1h)
-            ta_monthly = self.calculate_technical_indicators(df_1d)
-            ta_yearly = self.calculate_technical_indicators(df_1w)
+            # 2. Add indicators
+            logger.info("Step 2: Calculating indicators")
+            data = self.enrich_with_indicators(data)
             
-            # 3. Получаем данные S&P 500
-            logger.info("Шаг 3: Получение данных S&P 500")
-            sp500_data = self.fetch_sp500_data()
+            # 3. Classify regime
+            logger.info("Step 3: Classifying regime")
+            regime_data = self.classify_regime(data)
+            logger.info(f"Regime: {regime_data['regime']} (conf: {regime_data['confidence']}%)")
             
-            # 4. Получаем макроэкономические данные
-            logger.info("Шаг 4: Получение макроэкономических данных")
-            macro_data = self.fetch_macro_data()
+            # 4. Check triggers
+            logger.info("Step 4: Checking triggers")
+            should_publish, trigger_reason = self.check_triggers(data, regime_data)
             
-            # 5. Рассчитываем корреляцию BTC-SPX
-            logger.info("Шаг 5: Расчет корреляции BTC-SPX")
-            correlation = self.calculate_btc_sp500_correlation(df_1d)
+            if not should_publish:
+                logger.info("No triggers met - skipping publication")
+                # Update state anyway
+                self.state['last_regime'] = regime_data['regime']
+                self.state['last_round_level'] = self.get_round_level(data['btc']['price'])
+                self._save_state()
+                logger.info("State updated, exiting")
+                return
             
-            # 6. Генерируем AI прогноз
-            logger.info("Шаг 6: Генерация AI прогноза")
-            forecast = self.generate_ai_forecast(
-                ta_weekly, ta_monthly, ta_yearly,
-                sp500_data, macro_data, correlation
-            )
+            logger.info(f"Trigger: {trigger_reason}")
             
-            # 7. Форматируем сообщение
-            logger.info("Шаг 7: Форматирование сообщения")
-            message = self.format_telegram_message(ta_weekly, forecast)
+            # 5. Generate AI analysis
+            logger.info("Step 5: Generating AI analysis")
+            ai_analysis = self.generate_ai_analysis(data, regime_data)
             
-            # 8. Генерация графика ОТКЛЮЧЕНА для compliance
-            # TradingView ToS запрещает автоматический scraping
-            # TODO: Implement local chart generation with matplotlib if needed
-            logger.info("Шаг 8: Генерация графика пропущена (compliance)")
-            chart_path = None
+            # 6. Format message
+            logger.info("Step 6: Formatting message")
+            message = self.format_message(data, regime_data, trigger_reason, ai_analysis)
             
-            # 9. Публикуем в Telegram
-            logger.info("Шаг 9: Публикация BTC прогноза в Telegram")
-            self.publish_to_telegram(message, chart_path)
+            # 7. Publish
+            logger.info("Step 7: Publishing to Telegram")
+            self.publish_telegram(message)
             
-            # 10. Проверяем условия для ETH поста
-            logger.info("Шаг 10: Проверка условий для отдельного ETH прогноза")
-            try:
-                # Получаем данные ETH
-                eth_df_1h = self.fetch_eth_data('1h', limit=168)
-                
-                # Проверяем условия
-                should_post_eth, eth_reason = self.check_eth_post_conditions(eth_df_1h, df_1h)
-                
-                if should_post_eth:
-                    logger.info(f"ETH условия выполнены: {eth_reason}")
-                    
-                    # 11. Получаем данные ETH для разных таймфреймов
-                    logger.info("Шаг 11: Получение данных ETH для анализа")
-                    eth_df_1d = self.fetch_eth_data('1d', limit=90)
-                    eth_df_1w = self.fetch_eth_data('1w', limit=52)
-                    
-                    # 12. Рассчитываем технические индикаторы для ETH
-                    logger.info("Шаг 12: Расчет технических индикаторов ETH")
-                    eth_ta_weekly = self.calculate_technical_indicators(eth_df_1h)
-                    eth_ta_monthly = self.calculate_technical_indicators(eth_df_1d)
-                    eth_ta_yearly = self.calculate_technical_indicators(eth_df_1w)
-                    
-                    # 12a. Рассчитываем корреляцию ETH-SPX
-                    logger.info("Шаг 12a: Расчет корреляции ETH-SPX")
-                    eth_correlation = self.calculate_eth_sp500_correlation(eth_df_1d)
-                    
-                    # 13. Генерируем ETH прогноз
-                    logger.info("Шаг 13: Генерация AI прогноза для ETH")
-                    eth_forecast = self.generate_eth_forecast(
-                        eth_ta_weekly, 
-                        eth_ta_monthly, 
-                        eth_ta_yearly,
-                        eth_reason,  # Используем reason как контекст
-                        sp500_data,  # Добавляем S&P 500 данные
-                        macro_data,
-                        eth_correlation  # Добавляем корреляцию ETH-SPX
-                    )
-                    
-                    # 14. Форматируем и публикуем ETH прогноз
-                    logger.info("Шаг 14: Публикация ETH прогноза в Telegram")
-                    
-                    # Реальная задержка 1 час между BTC и ETH постами
-                    logger.info("⏳ Ожидание 1 часа перед публикацией ETH...")
-                    time.sleep(3600)  # 1 час = 3600 секунд
-                    
-                    # Время публикации ETH (фактическое текущее время)
-                    eth_time = datetime.now()
-                    eth_price = eth_ta_weekly['current_price']
-                    
-                    eth_message = f"""<b>ETHEREUM · MARKET STATE UPDATE</b>
-
-ETH ${eth_price:,.0f}
-
-{eth_forecast}
-
-<i>OracAI · Regime Analysis | {eth_time.strftime('%d %b %Y %H:%M UTC')}</i>
-"""
-                    self.publish_to_telegram(eth_message, None)
-                    logger.info("✅ ETH прогноз успешно опубликован")
-                else:
-                    logger.info(f"ETH условия не выполнены: {eth_reason}")
-                    
-            except Exception as e:
-                logger.warning(f"Ошибка при обработке ETH: {e}. Продолжаем без ETH прогноза.")
+            # 8. Update state
+            self.state['last_regime'] = regime_data['regime']
+            self.state['last_publish'] = datetime.utcnow().isoformat()
+            self.state['last_round_level'] = self.get_round_level(data['btc']['price'])
+            self._save_state()
             
             logger.info("=" * 50)
-            logger.info("BTC Forecast Bot завершил работу успешно!")
+            logger.info("OracAI Radar completed successfully!")
             logger.info("=" * 50)
             
         except Exception as e:
-            logger.error(f"Критическая ошибка в работе бота: {e}", exc_info=True)
+            logger.error(f"Critical error: {e}", exc_info=True)
             sys.exit(1)
 
 
 def main():
-    """Точка входа"""
-    bot = BTCForecastBot()
+    bot = OracAIRadar()
     bot.run()
 
 
