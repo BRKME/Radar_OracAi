@@ -427,51 +427,40 @@ class OracAIRadar:
     # ═══════════════════════════════════════════════════════════
     
     def generate_ai_analysis(self, data: Dict, regime_data: Dict) -> str:
-        """Generate AI analysis - simplified for general audience"""
+        """Generate AI analysis - compact, action-focused"""
         try:
             price = data['btc']['price']
             rsi = data['btc'].get('rsi', 50)
             ema200 = data['btc'].get('ema200', price)
             change_7d = data['btc'].get('change_7d', 0)
             
-            system_prompt = """You are a crypto market analyst writing for a general audience (NOT professional traders).
-Your goal: explain what the current market regime means in simple terms.
+            system_prompt = """You are a crypto market analyst. Write for a general audience.
 
-Output EXACTLY this format (use these exact headers):
+Output EXACTLY this format:
 
-◼️ Alpha Take:
-[2-3 sentences: What does this regime mean? Is it safer to be defensive or aggressive right now? Keep it simple, no jargon.]
+◼️ [1-2 sentences: What's happening and what to do. Simple language.]
 
-Positioning Guidance
-• New long positions: [low risk / moderate risk / high risk]
-• Aggressive buying: [encouraged / neutral / discouraged]
-• Defensive stance: [preferred / neutral / not needed]
+<b>Positioning</b>
+🟢 New longs: [low risk / moderate risk / high risk]
+⚠️ Aggressive buying: [encouraged / neutral / discouraged]  
+🛡️ Defensive stance: [preferred / neutral / not needed]
 
-Key Price Levels
-📉 $[X] — A break below may [simple consequence]
-📈 $[Y] — Sustained move above would [simple consequence]
-
-What Would Change This View
+<b>What Would Change This</b>
 • [Simple condition 1]
 • [Simple condition 2]
 
 RULES:
-- NO technical jargon (no "RSI", "EMA", "momentum", "asymmetry")
-- Write for someone who doesn't trade professionally
-- Be clear about risk: is it safer to buy, sell, or wait?
-- Under 120 words total
-- Levels should be round numbers (nearest $1000)"""
+- NO technical jargon
+- Under 80 words total
+- Focus on ACTION, not analysis
+- Use the exact emoji and formatting shown"""
 
             user_prompt = f"""Regime: {regime_data['regime']}
 Confidence: {regime_data['confidence']}%
 Tail risk: {regime_data['tail_risk']}
+BTC: ${price:,.0f}, RSI: {rsi:.0f}, 7d: {change_7d:+.1f}%
 
-BTC Price: ${price:,.0f}
-RSI: {rsi:.1f}
-EMA200: ${ema200:,.0f}
-7d change: {change_7d:+.1f}%
-
-Generate analysis for general audience."""
+Generate compact analysis."""
 
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
@@ -480,7 +469,7 @@ Generate analysis for general audience."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=400
+                max_tokens=300
             )
             
             return response.choices[0].message.content
@@ -490,117 +479,118 @@ Generate analysis for general audience."""
             return self._fallback_analysis(data, regime_data)
     
     def _fallback_analysis(self, data: Dict, regime_data: Dict) -> str:
-        """Fallback analysis without AI - simplified format"""
+        """Fallback analysis - compact format with icons"""
         regime = regime_data['regime_base']
-        price = data['btc']['price']
-        
-        # Round to nearest $1000
-        support = int((price * 0.92) // 1000) * 1000
-        resistance = int((price * 1.08) // 1000) * 1000
         
         if regime == "BEAR":
-            return f"""◼️ Alpha Take:
-The market remains weak with selling pressure dominating. Short-term bounces are possible, but the overall direction is still downward. It's safer to reduce risk than to increase it right now.
+            return """◼️ Market is weak. Selling pressure dominates. Wait for clearer signals before buying.
 
-Positioning Guidance
-• New long positions: high risk
-• Aggressive buying: discouraged
-• Defensive stance: preferred
+<b>Positioning</b>
+🟢 New longs: high risk
+⚠️ Aggressive buying: discouraged
+🛡️ Defensive stance: preferred
 
-Key Price Levels
-📉 ${support:,} — A break below may accelerate the decline
-📈 ${resistance:,} — Sustained move above would weaken the bearish case
+<b>What Would Change This</b>
+• Sustained price recovery
+• Shift in market sentiment"""
+        elif regime == "BULL":
+            return """◼️ Market is strong. Buyers are in control. Dips may offer opportunities.
 
-What Would Change This View
-• Price holds above ${resistance:,} for several days
-• Clear shift in market sentiment"""
+<b>Positioning</b>
+🟢 New longs: low risk
+⚠️ Aggressive buying: neutral
+🛡️ Defensive stance: not needed
+
+<b>What Would Change This</b>
+• Significant price breakdown
+• Loss of buying momentum"""
         else:
-            return f"""◼️ Alpha Take:
-The market is in transition with no clear direction yet. Both upside and downside scenarios remain possible. A cautious approach is recommended until the picture becomes clearer.
+            return """◼️ Market is undecided. Neither buyers nor sellers dominate. Best to wait for direction.
 
-Positioning Guidance
-• New long positions: moderate risk
-• Aggressive buying: neutral
-• Defensive stance: neutral
+<b>Positioning</b>
+🟢 New longs: moderate risk
+⚠️ Aggressive buying: discouraged
+🛡️ Defensive stance: preferred
 
-Key Price Levels
-📉 ${support:,} — A break below may resume weakness
-📈 ${resistance:,} — Sustained move above would confirm strength
-
-What Would Change This View
-• Clear break above ${resistance:,}
-• Clear break below ${support:,}"""
+<b>What Would Change This</b>
+• Clear trend formation
+• Decisive breakout in either direction"""
     
     # ═══════════════════════════════════════════════════════════
     # MESSAGE FORMATTING
     # ═══════════════════════════════════════════════════════════
     
     def format_message(self, data: Dict, regime_data: Dict, trigger_reason: str, ai_analysis: str) -> str:
-        """Format message for Telegram - Clean structure for general audience"""
+        """Format message for Telegram - Clean UX-focused structure"""
         
         regime = regime_data['regime']
         confidence = regime_data['confidence']
         tail_risk = regime_data['tail_risk']
-        tail_dir = regime_data['tail_direction'] or ''
         
         btc_price = data['btc']['price']
         btc_24h = data['btc']['change_24h']
         btc_7d = data['btc'].get('change_7d', 0)
         eth_price = data['eth']['price']
         eth_24h = data['eth']['change_24h']
-        eth_7d = data['eth'].get('change_7d', 0)
+        
+        # Timestamp
+        timestamp = datetime.utcnow().strftime('%d %b %Y · %H:%M UTC')
         
         # Regime emoji and name
         if 'BULL' in regime:
             regime_emoji = '🟢'
             regime_name = "Bullish"
             if 'early' in regime.lower():
-                regime_name = "Bullish (early phase)"
+                regime_name = "Bullish (early)"
         elif 'BEAR' in regime:
             regime_emoji = '🔴'
             regime_name = "Bearish"
             if 'early' in regime.lower():
-                regime_name = "Bearish (early phase)"
+                regime_name = "Bearish (early)"
         else:
             regime_emoji = '🟡'
             regime_name = "Transition"
         
-        # Tail risk description (simplified)
-        tail_text = ""
+        # Visual confidence bar [████░░░░░░] 27%
+        filled = int(confidence / 10)
+        empty = 10 - filled
+        conf_bar = '█' * filled + '░' * empty
+        
+        # Price change formatting with color
+        def format_change(val):
+            if val > 0:
+                return f"<b>+{val:.1f}%</b>"
+            elif val < 0:
+                return f"{val:.1f}%"
+            else:
+                return f"{val:.1f}%"
+        
+        # Key levels (round to nearest $1000)
+        support = int((btc_price * 0.92) // 1000) * 1000
+        resistance = int((btc_price * 1.08) // 1000) * 1000
+        current_k = int(btc_price // 1000)
+        
+        # Visual price scale
+        price_scale = f"📉 ${support//1000}k ····· ${current_k}k ····· ${resistance//1000}k 📈"
+        
+        # Risk flag
+        risk_line = ""
         if tail_risk == "ACTIVE":
-            tail_text = "Elevated risk of sharp downside moves."
-        elif tail_risk == "ELEVATED":
-            tail_text = "Moderately elevated volatility risk."
+            risk_line = "\n⚠️ <b>Elevated risk of sharp moves</b>"
         
-        # Format timestamp
-        timestamp = datetime.utcnow().strftime('%d %b %Y · %H:%M UTC')
-        
-        message = f"""<b>BITCOIN · MARKET STATE</b>
-{timestamp}
+        message = f"""<b>BTC/USD</b> · {timestamp}
 
-<b>Market Regime</b>
 {regime_emoji} <b>{regime_name}</b>
-• Model Confidence: {confidence}%"""
+[{conf_bar}] {confidence}%{risk_line}
 
-        if tail_text:
-            message += f"\n• {tail_text}"
-        
-        message += f"""
+<b>Prices</b>
+BTC ${btc_price:,.0f}  {format_change(btc_24h)} 24h | {btc_7d:+.1f}% 7d
+ETH ${eth_price:,.0f}  {format_change(eth_24h)} 24h
 
-<b>Current Prices</b>
-• BTC: ${btc_price:,.0f} ({btc_24h:+.1f}% 24h | {btc_7d:+.1f}% 7d)
-• ETH: ${eth_price:,.0f} ({eth_24h:+.1f}% 24h)
+{ai_analysis}
 
-{ai_analysis}"""
-
-        # Risk flags section (only if active)
-        if tail_risk == "ACTIVE":
-            message += f"""
-
-⚠️ <b>Risk Flag</b>
-Elevated tail risk (higher probability of sharp moves)"""
-
-        message += f"""
+<b>Key Levels</b>
+{price_scale}
 
 <i>OracAI Radar</i>"""
         
