@@ -67,7 +67,8 @@ class OracAIRadar:
             'last_regime': None,
             'last_publish': None,
             'last_round_level': None,
-            'last_round_publish': None
+            'last_round_publish': None,
+            'last_tail_risk_publish': None
         }
     
     def _save_state(self):
@@ -273,31 +274,31 @@ class OracAIRadar:
         return int(price // 5000) * 5000
     
     def check_triggers(self, data: Dict, regime_data: Dict) -> Tuple[bool, str]:
-        """Проверка триггеров публикации"""
+        """Check publication triggers"""
         triggers = []
         
-        # 1. Значительное движение 24h (>5%)
+        # 1. Significant 24h move (>5%)
         btc_change = abs(data['btc']['change_24h'])
         if btc_change > 5.0:
-            triggers.append(f"BTC {data['btc']['change_24h']:+.1f}% за 24h")
+            triggers.append(f"BTC {data['btc']['change_24h']:+.1f}% in 24h")
         
-        # 2. Значительное движение 7d (>10%)
+        # 2. Significant 7d move (>10%)
         btc_7d = abs(data['btc'].get('change_7d', 0))
         if btc_7d > 10.0:
-            triggers.append(f"BTC {data['btc']['change_7d']:+.1f}% за 7d")
+            triggers.append(f"BTC {data['btc']['change_7d']:+.1f}% in 7d")
         
-        # 3. Смена режима
+        # 3. Regime change
         current_regime = regime_data['regime']
         last_regime = self.state.get('last_regime')
         if last_regime and current_regime != last_regime:
-            triggers.append(f"Режим: {last_regime} → {current_regime}")
+            triggers.append(f"Regime: {last_regime} → {current_regime}")
         
-        # 4. Пробой круглого уровня
+        # 4. Round level breakout
         current_level = self.get_round_level(data['btc']['price'])
         last_level = self.state.get('last_round_level')
         
         if last_level and current_level != last_level:
-            # Cooldown 4 часа
+            # 4 hours cooldown
             last_round_pub = self.state.get('last_round_publish')
             cooldown_ok = True
             
@@ -309,13 +310,25 @@ class OracAIRadar:
                     pass
             
             if cooldown_ok:
-                direction = "выше" if current_level > last_level else "ниже"
-                triggers.append(f"BTC пробил {direction} ${current_level:,}")
+                direction = "above" if current_level > last_level else "below"
+                triggers.append(f"BTC broke {direction} ${current_level:,}")
                 self.state['last_round_publish'] = datetime.utcnow().isoformat()
         
-        # 5. Tail risk активен
+        # 5. Tail risk активен (с cooldown 6 часов)
         if regime_data['tail_risk'] == "ACTIVE":
-            triggers.append("Tail risk ACTIVE")
+            last_tail_pub = self.state.get('last_tail_risk_publish')
+            tail_cooldown_ok = True
+            
+            if last_tail_pub:
+                try:
+                    elapsed = (datetime.utcnow() - datetime.fromisoformat(last_tail_pub)).total_seconds()
+                    tail_cooldown_ok = elapsed > 6 * 3600  # 6 hours cooldown
+                except:
+                    pass
+            
+            if tail_cooldown_ok:
+                triggers.append("Tail risk ACTIVE")
+                self.state['last_tail_risk_publish'] = datetime.utcnow().isoformat()
         
         return (len(triggers) > 0, ' | '.join(triggers) if triggers else '')
     
@@ -324,7 +337,7 @@ class OracAIRadar:
     # ═══════════════════════════════════════════════════════════
     
     def build_interpretation(self, data: Dict, regime_data: Dict) -> list:
-        """Построение интерпретации"""
+        """Build interpretation in English"""
         lines = []
         regime = regime_data['regime_base']
         rsi = data['btc'].get('rsi', 50)
@@ -337,38 +350,38 @@ class OracAIRadar:
         # Structure
         if regime == "BEAR":
             if change_24h > 2:
-                lines.append("Short-term bounce в рамках нисходящего тренда")
+                lines.append("Short-term bounce within downtrend")
             else:
-                lines.append("Ценовая структура остаётся медвежьей")
+                lines.append("Price structure remains bearish")
         elif regime == "BULL":
             if change_24h < -2:
-                lines.append("Краткосрочная коррекция в рамках восходящего тренда")
+                lines.append("Short-term pullback within uptrend")
             else:
-                lines.append("Ценовая структура остаётся бычьей")
+                lines.append("Price structure remains bullish")
         else:
-            lines.append("Рынок в переходном состоянии")
+            lines.append("Market in transition")
         
         # Momentum
         if rsi > 70:
-            lines.append("Моментум перегрет — риск отката")
+            lines.append("Momentum overheated — pullback risk elevated")
         elif rsi < 30:
-            lines.append("Моментум перепродан — возможен отскок")
+            lines.append("Momentum oversold — bounce possible")
         elif (regime == "BEAR" and rsi < 45) or (regime == "BULL" and rsi > 55):
-            lines.append("Моментум подтверждает текущий режим")
+            lines.append("Momentum confirms current regime")
         else:
-            lines.append("Моментум нейтральный")
+            lines.append("Momentum neutral")
         
         # Volume
         if vol_ratio < 0.6:
-            lines.append("Объёмы аномально низкие")
+            lines.append("Volume abnormally low")
         elif vol_ratio > 1.5:
-            lines.append("Повышенные объёмы — возможно начало движения")
+            lines.append("Elevated volume — potential move starting")
         
         # EMA structure
         if not above_ema20 and not above_ema50 and regime == "BEAR":
-            lines.append("Цена ниже ключевых MA — слабость подтверждена")
+            lines.append("Price below key MAs — weakness confirmed")
         elif above_ema20 and above_ema50 and regime == "BULL":
-            lines.append("Цена выше ключевых MA — сила подтверждена")
+            lines.append("Price above key MAs — strength confirmed")
         
         return lines[:4]  # Max 4 lines
     
@@ -377,51 +390,51 @@ class OracAIRadar:
     # ═══════════════════════════════════════════════════════════
     
     def generate_ai_analysis(self, data: Dict, regime_data: Dict) -> str:
-        """Генерация AI анализа"""
+        """Generate AI analysis - simplified for general audience"""
         try:
             price = data['btc']['price']
             rsi = data['btc'].get('rsi', 50)
             ema200 = data['btc'].get('ema200', price)
             change_7d = data['btc'].get('change_7d', 0)
             
-            system_prompt = """You are a crypto market regime analyst. Output ONLY the following sections, nothing else:
+            system_prompt = """You are a crypto market analyst writing for a general audience (NOT professional traders).
+Your goal: explain what the current market regime means in simple terms.
 
-Bias:
-• [1 sentence about directional pressure]
-• [1 sentence about risk asymmetry]
+Output EXACTLY this format (use these exact headers):
 
-Key implication:
-[1 sentence: what this regime means for positioning]
+◼️ Alpha Take:
+[2-3 sentences: What does this regime mean? Is it safer to be defensive or aggressive right now? Keep it simple, no jargon.]
 
-Directional policy:
-• Longs: [encouraged/neutral/discouraged]
-• Shorts: [encouraged/tactical only/discouraged]
+Positioning Guidance
+• New long positions: [low risk / moderate risk / high risk]
+• Aggressive buying: [encouraged / neutral / discouraged]
+• Defensive stance: [preferred / neutral / not needed]
 
-Reference zones (not signals):
-• $[X] — [what breach means]
-• $[Y] — [what breach means]
+Key Price Levels
+📉 $[X] — A break below may [simple consequence]
+📈 $[Y] — Sustained move above would [simple consequence]
 
-What would change the view:
-• [Condition 1]
-• [Condition 2]
+What Would Change This View
+• [Simple condition 1]
+• [Simple condition 2]
 
 RULES:
-- NO bold, NO emojis, NO hashtags
-- Under 150 words
-- Zones are REFERENCES not trade signals
-- Use "breach would imply" language"""
+- NO technical jargon (no "RSI", "EMA", "momentum", "asymmetry")
+- Write for someone who doesn't trade professionally
+- Be clear about risk: is it safer to buy, sell, or wait?
+- Under 120 words total
+- Levels should be round numbers (nearest $1000)"""
 
             user_prompt = f"""Regime: {regime_data['regime']}
 Confidence: {regime_data['confidence']}%
-Tail risk: {regime_data['tail_risk']} {regime_data['tail_direction'] or ''}
-Score: {regime_data['score']}
+Tail risk: {regime_data['tail_risk']}
 
 BTC Price: ${price:,.0f}
 RSI: {rsi:.1f}
 EMA200: ${ema200:,.0f}
 7d change: {change_7d:+.1f}%
 
-Generate regime analysis."""
+Generate analysis for general audience."""
 
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
@@ -430,7 +443,7 @@ Generate regime analysis."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=500
+                max_tokens=400
             )
             
             return response.choices[0].message.content
@@ -440,58 +453,53 @@ Generate regime analysis."""
             return self._fallback_analysis(data, regime_data)
     
     def _fallback_analysis(self, data: Dict, regime_data: Dict) -> str:
-        """Fallback анализ без AI"""
+        """Fallback analysis without AI - simplified format"""
         regime = regime_data['regime_base']
         price = data['btc']['price']
-        ema200 = data['btc'].get('ema200', price)
+        
+        # Round to nearest $1000
+        support = int((price * 0.92) // 1000) * 1000
+        resistance = int((price * 1.08) // 1000) * 1000
         
         if regime == "BEAR":
-            return f"""Bias:
-• Directional downside pressure persists
-• Risk asymmetry favors downside moves
+            return f"""◼️ Alpha Take:
+The market remains weak with selling pressure dominating. Short-term bounces are possible, but the overall direction is still downward. It's safer to reduce risk than to increase it right now.
 
-Key implication:
-Current conditions favor capital preservation over aggressive positioning.
+Positioning Guidance
+• New long positions: high risk
+• Aggressive buying: discouraged
+• Defensive stance: preferred
 
-Directional policy:
-• Longs: discouraged
-• Shorts: tactical only
-• Position size: reduced
+Key Price Levels
+📉 ${support:,} — A break below may accelerate the decline
+📈 ${resistance:,} — Sustained move above would weaken the bearish case
 
-Reference zones (not signals):
-• ${ema200:,.0f} — breach above would imply bias invalidation
-• ${price * 0.9:,.0f} — breach below would imply acceleration
-
-What would change the view:
-• Sustained move above EMA200
-• Shift in macro risk sentiment"""
+What Would Change This View
+• Price holds above ${resistance:,} for several days
+• Clear shift in market sentiment"""
         else:
-            return f"""Bias:
-• Directional structure improving
-• Risk asymmetry shifting neutral
+            return f"""◼️ Alpha Take:
+The market is in transition with no clear direction yet. Both upside and downside scenarios remain possible. A cautious approach is recommended until the picture becomes clearer.
 
-Key implication:
-Market in transition, await confirmation before aggressive positioning.
+Positioning Guidance
+• New long positions: moderate risk
+• Aggressive buying: neutral
+• Defensive stance: neutral
 
-Directional policy:
-• Longs: neutral
-• Shorts: discouraged
-• Position size: normal
+Key Price Levels
+📉 ${support:,} — A break below may resume weakness
+📈 ${resistance:,} — Sustained move above would confirm strength
 
-Reference zones (not signals):
-• ${price * 1.05:,.0f} — breach would confirm strength
-• ${price * 0.95:,.0f} — breach would resume weakness
-
-What would change the view:
-• Clear break of current range
-• Volume confirmation"""
+What Would Change This View
+• Clear break above ${resistance:,}
+• Clear break below ${support:,}"""
     
     # ═══════════════════════════════════════════════════════════
     # MESSAGE FORMATTING
     # ═══════════════════════════════════════════════════════════
     
     def format_message(self, data: Dict, regime_data: Dict, trigger_reason: str, ai_analysis: str) -> str:
-        """Форматирование сообщения для Telegram"""
+        """Format message for Telegram - Clean structure for general audience"""
         
         regime = regime_data['regime']
         confidence = regime_data['confidence']
@@ -503,38 +511,61 @@ What would change the view:
         btc_7d = data['btc'].get('change_7d', 0)
         eth_price = data['eth']['price']
         eth_24h = data['eth']['change_24h']
+        eth_7d = data['eth'].get('change_7d', 0)
         
-        # Regime emoji
+        # Regime emoji and name
         if 'BULL' in regime:
             regime_emoji = '🟢'
+            regime_name = "Bullish"
+            if 'early' in regime.lower():
+                regime_name = "Bullish (early phase)"
         elif 'BEAR' in regime:
             regime_emoji = '🔴'
+            regime_name = "Bearish"
+            if 'early' in regime.lower():
+                regime_name = "Bearish (early phase)"
         else:
             regime_emoji = '🟡'
+            regime_name = "Transition"
         
-        # Interpretation
-        interpretation = self.build_interpretation(data, regime_data)
-        interp_text = '\n'.join([f"• {line}" for line in interpretation])
+        # Tail risk description (simplified)
+        tail_text = ""
+        if tail_risk == "ACTIVE":
+            tail_text = "Elevated risk of sharp downside moves."
+        elif tail_risk == "ELEVATED":
+            tail_text = "Moderately elevated volatility risk."
+        
+        # Format timestamp
+        timestamp = datetime.utcnow().strftime('%d %b %Y · %H:%M UTC')
         
         message = f"""<b>BITCOIN · MARKET STATE</b>
+{timestamp}
 
-{regime_emoji} <b>{regime}</b>
-Confidence: {confidence}%
-Tail risk: {tail_risk} {tail_dir}
+<b>Market Regime</b>
+{regime_emoji} <b>{regime_name}</b>
+• Model Confidence: {confidence}%"""
 
-<b>Prices</b>
+        if tail_text:
+            message += f"\n• {tail_text}"
+        
+        message += f"""
+
+<b>Current Prices</b>
 • BTC: ${btc_price:,.0f} ({btc_24h:+.1f}% 24h | {btc_7d:+.1f}% 7d)
 • ETH: ${eth_price:,.0f} ({eth_24h:+.1f}% 24h)
 
-<b>Interpretation</b>
-{interp_text}
+{ai_analysis}"""
 
-{ai_analysis}
+        # Risk flags section (only if active)
+        if tail_risk == "ACTIVE":
+            message += f"""
 
-<b>What changed</b>
-{trigger_reason}
+⚠️ <b>Risk Flag</b>
+Elevated tail risk (higher probability of sharp moves)"""
 
-<i>OracAI Radar | {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}</i>"""
+        message += f"""
+
+<i>OracAI Radar</i>"""
         
         return message
     
