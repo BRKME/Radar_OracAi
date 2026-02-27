@@ -103,17 +103,24 @@ class OracAIRadar:
             eth_7d_ago = float(eth_df_1h['close'].iloc[-168]) if len(eth_df_1h) >= 168 else eth_price
             eth_change_7d = ((eth_price / eth_7d_ago) - 1) * 100 if eth_7d_ago else 0
             
+            btc_change_24h = btc_ticker.get('percentage') or 0.0
+            eth_change_24h = eth_ticker.get('percentage') or 0.0
+            
+            # Log for debugging
+            logger.info(f"BTC: ${btc_price:,.0f} | 24h: {btc_change_24h}% | 7d: {btc_change_7d:.1f}%")
+            logger.info(f"ETH: ${eth_price:,.0f} | 24h: {eth_change_24h}%")
+            
             return {
                 'btc': {
                     'price': btc_price,
-                    'change_24h': btc_ticker.get('percentage') or 0.0,
+                    'change_24h': btc_change_24h,
                     'change_7d': btc_change_7d,
                     'df_1h': btc_df_1h,
                     'df_1d': btc_df_1d
                 },
                 'eth': {
                     'price': eth_price,
-                    'change_24h': eth_ticker.get('percentage') or 0.0,
+                    'change_24h': eth_change_24h,
                     'change_7d': eth_change_7d,
                     'df_1h': eth_df_1h
                 }
@@ -276,29 +283,52 @@ class OracAIRadar:
     def check_triggers(self, data: Dict, regime_data: Dict) -> Tuple[bool, str]:
         """Check publication triggers"""
         triggers = []
+        btc_price = data['btc']['price']
         
         # 1. Significant 24h move (>5%)
-        btc_change = abs(data['btc']['change_24h'])
-        if btc_change > 5.0:
-            triggers.append(f"BTC {data['btc']['change_24h']:+.1f}% in 24h")
+        btc_change_raw = data['btc']['change_24h']
+        # Handle both formats: 5.0 (percent) or 0.05 (ratio)
+        if abs(btc_change_raw) < 1 and abs(btc_change_raw) > 0:
+            btc_change = btc_change_raw * 100  # Convert ratio to percent
+        else:
+            btc_change = btc_change_raw
+        
+        if abs(btc_change) > 5.0:
+            triggers.append(f"BTC {btc_change:+.1f}% in 24h")
+            logger.info(f"Trigger: 24h change {btc_change:+.1f}%")
         
         # 2. Significant 7d move (>10%)
-        btc_7d = abs(data['btc'].get('change_7d', 0))
-        if btc_7d > 10.0:
-            triggers.append(f"BTC {data['btc']['change_7d']:+.1f}% in 7d")
+        btc_7d_raw = data['btc'].get('change_7d', 0)
+        if abs(btc_7d_raw) < 1 and abs(btc_7d_raw) > 0:
+            btc_7d = btc_7d_raw * 100
+        else:
+            btc_7d = btc_7d_raw
+            
+        if abs(btc_7d) > 10.0:
+            triggers.append(f"BTC {btc_7d:+.1f}% in 7d")
+            logger.info(f"Trigger: 7d change {btc_7d:+.1f}%")
         
         # 3. Regime change
         current_regime = regime_data['regime']
         last_regime = self.state.get('last_regime')
         if last_regime and current_regime != last_regime:
             triggers.append(f"Regime: {last_regime} → {current_regime}")
+            logger.info(f"Trigger: Regime change {last_regime} → {current_regime}")
         
-        # 4. Round level breakout
-        current_level = self.get_round_level(data['btc']['price'])
+        # 4. Round level breakout ($5000 step)
+        current_level = self.get_round_level(btc_price)
         last_level = self.state.get('last_round_level')
         
-        if last_level and current_level != last_level:
-            # 4 hours cooldown
+        logger.info(f"Price: ${btc_price:,.0f}, Current level: ${current_level:,}, Last level: {last_level}")
+        
+        # Initialize last_level if None
+        if last_level is None:
+            logger.info(f"Initializing last_round_level to ${current_level:,}")
+            self.state['last_round_level'] = current_level
+            last_level = current_level
+        
+        if current_level != last_level:
+            # Check cooldown (4 hours)
             last_round_pub = self.state.get('last_round_publish')
             cooldown_ok = True
             
@@ -306,15 +336,25 @@ class OracAIRadar:
                 try:
                     elapsed = (datetime.utcnow() - datetime.fromisoformat(last_round_pub)).total_seconds()
                     cooldown_ok = elapsed > 4 * 3600
-                except:
-                    pass
+                    logger.info(f"Round level cooldown: {elapsed/3600:.1f}h elapsed, ok={cooldown_ok}")
+                except Exception as e:
+                    logger.warning(f"Cooldown parse error: {e}")
             
             if cooldown_ok:
+                # Calculate how many levels were crossed
+                levels_crossed = abs(current_level - last_level) // 5000
                 direction = "above" if current_level > last_level else "below"
-                triggers.append(f"BTC broke {direction} ${current_level:,}")
+                
+                if levels_crossed > 1:
+                    triggers.append(f"BTC broke {direction} ${current_level:,} (crossed {int(levels_crossed)} levels)")
+                else:
+                    triggers.append(f"BTC broke {direction} ${current_level:,}")
+                    
+                logger.info(f"Trigger: Round level ${last_level:,} → ${current_level:,}")
                 self.state['last_round_publish'] = datetime.utcnow().isoformat()
+                self.state['last_round_level'] = current_level
         
-        # 5. Tail risk активен (с cooldown 6 часов)
+        # 5. Tail risk active (6 hours cooldown)
         if regime_data['tail_risk'] == "ACTIVE":
             last_tail_pub = self.state.get('last_tail_risk_publish')
             tail_cooldown_ok = True
@@ -323,13 +363,16 @@ class OracAIRadar:
                 try:
                     elapsed = (datetime.utcnow() - datetime.fromisoformat(last_tail_pub)).total_seconds()
                     tail_cooldown_ok = elapsed > 6 * 3600  # 6 hours cooldown
-                except:
-                    pass
+                    logger.info(f"Tail risk cooldown: {elapsed/3600:.1f}h elapsed, ok={tail_cooldown_ok}")
+                except Exception as e:
+                    logger.warning(f"Tail cooldown parse error: {e}")
             
             if tail_cooldown_ok:
                 triggers.append("Tail risk ACTIVE")
                 self.state['last_tail_risk_publish'] = datetime.utcnow().isoformat()
+                logger.info("Trigger: Tail risk ACTIVE")
         
+        logger.info(f"Total triggers: {len(triggers)} - {triggers}")
         return (len(triggers) > 0, ' | '.join(triggers) if triggers else '')
     
     # ═══════════════════════════════════════════════════════════
