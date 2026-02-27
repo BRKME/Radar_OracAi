@@ -286,34 +286,28 @@ class OracAIRadar:
         btc_price = data['btc']['price']
         
         # 1. Significant 24h move (>5%)
-        btc_change_raw = data['btc']['change_24h']
-        # Handle both formats: 5.0 (percent) or 0.05 (ratio)
-        if abs(btc_change_raw) < 1 and abs(btc_change_raw) > 0:
-            btc_change = btc_change_raw * 100  # Convert ratio to percent
-        else:
-            btc_change = btc_change_raw
+        # Kraken returns percentage as-is (e.g., 5.2 means 5.2%)
+        btc_change = data['btc']['change_24h']
         
+        logger.info(f"Checking 24h trigger: {btc_change:.2f}% (threshold: >5%)")
         if abs(btc_change) > 5.0:
             triggers.append(f"BTC {btc_change:+.1f}% in 24h")
-            logger.info(f"Trigger: 24h change {btc_change:+.1f}%")
+            logger.info(f"Trigger FIRED: 24h change {btc_change:+.1f}%")
         
         # 2. Significant 7d move (>10%)
-        btc_7d_raw = data['btc'].get('change_7d', 0)
-        if abs(btc_7d_raw) < 1 and abs(btc_7d_raw) > 0:
-            btc_7d = btc_7d_raw * 100
-        else:
-            btc_7d = btc_7d_raw
-            
+        btc_7d = data['btc'].get('change_7d', 0)
+        
+        logger.info(f"Checking 7d trigger: {btc_7d:.2f}% (threshold: >10%)")
         if abs(btc_7d) > 10.0:
             triggers.append(f"BTC {btc_7d:+.1f}% in 7d")
-            logger.info(f"Trigger: 7d change {btc_7d:+.1f}%")
+            logger.info(f"Trigger FIRED: 7d change {btc_7d:+.1f}%")
         
         # 3. Regime change
         current_regime = regime_data['regime']
         last_regime = self.state.get('last_regime')
         if last_regime and current_regime != last_regime:
             triggers.append(f"Regime: {last_regime} → {current_regime}")
-            logger.info(f"Trigger: Regime change {last_regime} → {current_regime}")
+            logger.info(f"Trigger FIRED: Regime change {last_regime} → {current_regime}")
         
         # 4. Round level breakout ($5000 step)
         current_level = self.get_round_level(btc_price)
@@ -350,7 +344,7 @@ class OracAIRadar:
                 else:
                     triggers.append(f"BTC broke {direction} ${current_level:,}")
                     
-                logger.info(f"Trigger: Round level ${last_level:,} → ${current_level:,}")
+                logger.info(f"Trigger FIRED: Round level ${last_level:,} → ${current_level:,}")
                 self.state['last_round_publish'] = datetime.utcnow().isoformat()
                 self.state['last_round_level'] = current_level
         

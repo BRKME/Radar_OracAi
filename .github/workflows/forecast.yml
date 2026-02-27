@@ -2,8 +2,11 @@ name: OracAI Radar
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Каждый час
+    - cron: '0 * * * *'  # Every hour
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   radar-scan:
@@ -37,6 +40,6 @@ jobs:
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add state.json || true
+          git add -f state.json
           git diff --quiet --cached || git commit -m "Update state"
-          git push || true
+          git push
